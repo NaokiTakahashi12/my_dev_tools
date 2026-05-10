@@ -1,1 +1,30 @@
 # my_dev_tools
+
+Rust で実装する開発用ツール集です。
+
+## csv_key_diff
+
+指定したキー列の値で 2 つの CSV の行を突き合わせ、差分を `diff` 風に標準出力します。
+
+```bash
+cargo run -- csv_key_diff left.csv right.csv --key id
+cargo run -- csv_key_diff left.csv right.csv --key id --key sub_id
+```
+
+差分がなければ `no differences` を出力します。差分がある場合は以下を検出します。
+
+- 片側にしか存在しない列名
+- キー列が片側 CSV に存在しない状態
+- 同じキーに対応する行の列値差分
+- 片側にしか存在しない行
+
+## csv_key_diff_extract
+
+`csv_key_diff` が出力した差分テキストをもとに、差分のある行だけを左右それぞれ別CSVへ保存します。
+
+```bash
+cargo run -- csv_key_diff left.csv right.csv --key id --key sub_id > diff.txt
+cargo run -- csv_key_diff_extract left.csv right.csv diff.txt \
+  --output_left left_diff_rows.csv \
+  --output_right right_diff_rows.csv
+```
