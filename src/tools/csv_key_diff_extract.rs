@@ -5,6 +5,12 @@ use std::path::Path;
 
 use super::csv_key_diff::{self, CsvData, KeyValue};
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct DiffSelection {
+    key_columns: Vec<String>,
+    rows: Vec<RowSelector>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 struct RowSelector {
     key: KeyValue,
@@ -21,10 +27,10 @@ pub fn extract_diff_rows_to_files(
     let left_csv = csv_key_diff::read_csv(left_path)?;
     let right_csv = csv_key_diff::read_csv(right_path)?;
     let diff_text = fs::read_to_string(diff_path)?;
-    let selectors = parse_diff_selectors(&diff_text)?;
+    let selection = parse_diff_selection(&diff_text)?;
 
-    let left_rows = extract_rows(&left_csv, &selectors);
-    let right_rows = extract_rows(&right_csv, &selectors);
+    let left_rows = extract_rows(&left_csv, &selection);
+    let right_rows = extract_rows(&right_csv, &selection);
 
     write_csv(output_left_path, &left_csv.headers, &left_rows)?;
     write_csv(output_right_path, &right_csv.headers, &right_rows)?;
@@ -32,12 +38,11 @@ pub fn extract_diff_rows_to_files(
     Ok(())
 }
 
-fn extract_rows(csv: &CsvData, selectors: &[RowSelector]) -> Vec<Vec<String>> {
+fn extract_rows(csv: &CsvData, selection: &DiffSelection) -> Vec<Vec<String>> {
     let header_index = header_index(&csv.headers);
-    let key_columns = selector_columns(selectors, &header_index);
     let mut occurrences_by_key = HashMap::<KeyValue, HashSet<usize>>::new();
 
-    for selector in selectors {
+    for selector in &selection.rows {
         occurrences_by_key
             .entry(selector.key.clone())
             .or_default()
@@ -48,7 +53,7 @@ fn extract_rows(csv: &CsvData, selectors: &[RowSelector]) -> Vec<Vec<String>> {
     let mut extracted = Vec::new();
 
     for row in &csv.rows {
-        let key = extract_key_from_row(row, &header_index, &key_columns);
+        let key = extract_key_from_row(row, &header_index, &selection.key_columns);
         let occurrence = seen_occurrences.entry(key.clone()).or_insert(0);
 
         if occurrences_by_key
@@ -62,27 +67,6 @@ fn extract_rows(csv: &CsvData, selectors: &[RowSelector]) -> Vec<Vec<String>> {
     }
 
     extracted
-}
-
-fn selector_columns(
-    selectors: &[RowSelector],
-    fallback_index: &HashMap<String, usize>,
-) -> Vec<String> {
-    selectors
-        .first()
-        .map(|selector| {
-            selector
-                .key
-                .0
-                .iter()
-                .map(|(name, _)| name.clone())
-                .collect::<Vec<_>>()
-        })
-        .unwrap_or_else(|| {
-            let mut names = fallback_index.keys().cloned().collect::<Vec<_>>();
-            names.sort();
-            names
-        })
 }
 
 fn header_index(headers: &[String]) -> HashMap<String, usize> {
@@ -123,16 +107,30 @@ fn write_csv(path: &Path, headers: &[String], rows: &[Vec<String>]) -> Result<()
     Ok(())
 }
 
-fn parse_diff_selectors(diff_text: &str) -> Result<Vec<RowSelector>, Box<dyn Error>> {
-    let mut selectors = Vec::new();
+fn parse_diff_selection(diff_text: &str) -> Result<DiffSelection, Box<dyn Error>> {
+    let mut key_columns = None;
+    let mut rows = Vec::new();
 
     for line in diff_text.lines() {
+        if let Some(parsed_key_columns) = parse_key_columns_line(line) {
+            key_columns = Some(parsed_key_columns);
+            continue;
+        }
+
         if let Some(selector) = parse_selector_line(line)? {
-            selectors.push(selector);
+            rows.push(selector);
         }
     }
 
-    Ok(selectors)
+    Ok(DiffSelection {
+        key_columns: key_columns.unwrap_or_default(),
+        rows,
+    })
+}
+
+fn parse_key_columns_line(line: &str) -> Option<Vec<String>> {
+    line.strip_prefix("keys: ")
+        .map(|value| value.split(", ").map(ToOwned::to_owned).collect::<Vec<_>>())
 }
 
 fn parse_selector_line(line: &str) -> Result<Option<RowSelector>, Box<dyn Error>> {
@@ -278,10 +276,10 @@ mod tests {
         );
 
         let report = diff_csv(&left, &right, &[String::from("id"), String::from("sub_id")]);
-        let selectors = parse_diff_selectors(&render_diff(&report)).unwrap();
+        let selection = parse_diff_selection(&render_diff(&report)).unwrap();
 
-        let left_rows = extract_rows(&left, &selectors);
-        let right_rows = extract_rows(&right, &selectors);
+        let left_rows = extract_rows(&left, &selection);
+        let right_rows = extract_rows(&right, &selection);
 
         assert_eq!(
             left_rows,
@@ -296,6 +294,14 @@ mod tests {
                 vec![String::from("1"), String::from("b"), String::from("25")],
                 vec![String::from("3"), String::from("a"), String::from("40")],
             ]
+        );
+    }
+
+    #[test]
+    fn parses_key_columns_line() {
+        assert_eq!(
+            parse_key_columns_line("keys: id, sub_id"),
+            Some(vec![String::from("id"), String::from("sub_id")])
         );
     }
 }
