@@ -28,3 +28,20 @@ cargo run -- csv_key_diff_extract left.csv right.csv diff.txt \
   --output_left left_diff_rows.csv \
   --output_right right_diff_rows.csv
 ```
+
+## csv_pseudo_diff
+
+指定した時間列と時系列データ列から、`(現在値 - 前回値) / ((現在時刻 - 前回時刻) * time_scale)` を計算し、CSVとして標準出力します。`--output` を指定すると同じ内容をファイルにも保存します。
+
+```bash
+cargo run -- csv_pseudo_diff input.csv \
+  --time_column stamp \
+  --value_column signal \
+  --time_scale 1.0
+
+cargo run -- csv_pseudo_diff input.csv \
+  --time_column stamp \
+  --value_column signal \
+  --time_scale 1.0 \
+  --output pseudo_diff.csv
+```

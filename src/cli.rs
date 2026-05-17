@@ -3,9 +3,9 @@ use std::error::Error;
 use std::ffi::OsString;
 use std::path::PathBuf;
 
-use crate::tools::{csv_key_diff, csv_key_diff_extract};
+use crate::tools::{csv_key_diff, csv_key_diff_extract, csv_pseudo_diff};
 
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, PartialEq)]
 enum Command {
     CsvKeyDiff {
         left: PathBuf,
@@ -18,6 +18,13 @@ enum Command {
         diff: PathBuf,
         output_left: PathBuf,
         output_right: PathBuf,
+    },
+    CsvPseudoDiff {
+        input: PathBuf,
+        time_column: String,
+        value_column: String,
+        time_scale: f64,
+        output: Option<PathBuf>,
     },
 }
 
@@ -51,6 +58,22 @@ fn run_from_args(args: Vec<OsString>) -> Result<i32, Box<dyn Error>> {
             )?;
             Ok(0)
         }
+        Command::CsvPseudoDiff {
+            input,
+            time_column,
+            value_column,
+            time_scale,
+            output,
+        } => {
+            csv_pseudo_diff::run(
+                &input,
+                &time_column,
+                &value_column,
+                time_scale,
+                output.as_deref(),
+            )?;
+            Ok(0)
+        }
     }
 }
 
@@ -62,6 +85,7 @@ fn parse_args(args: Vec<OsString>) -> Result<Command, Box<dyn Error>> {
     match command {
         "csv_key_diff" => parse_csv_key_diff(&args[1..]),
         "csv_key_diff_extract" => parse_csv_key_diff_extract(&args[1..]),
+        "csv_pseudo_diff" => parse_csv_pseudo_diff(&args[1..]),
         _ => Err(format!("unknown command: {command}\n\n{}", usage()).into()),
     }
 }
@@ -158,11 +182,83 @@ fn parse_csv_key_diff_extract(args: &[OsString]) -> Result<Command, Box<dyn Erro
     })
 }
 
+fn parse_csv_pseudo_diff(args: &[OsString]) -> Result<Command, Box<dyn Error>> {
+    if args.is_empty() {
+        return Err(String::from(
+            "csv_pseudo_diff requires INPUT --time_column NAME --value_column NAME --time_scale VALUE",
+        )
+        .into());
+    }
+
+    let input = PathBuf::from(&args[0]);
+    let mut time_column = None;
+    let mut value_column = None;
+    let mut time_scale = None;
+    let mut output = None;
+    let mut index = 1;
+
+    while index < args.len() {
+        match args[index].to_str() {
+            Some("--time_column") => {
+                let Some(value) = args.get(index + 1).and_then(|arg| arg.to_str()) else {
+                    return Err(String::from("missing value after --time_column").into());
+                };
+                time_column = Some(value.to_string());
+                index += 2;
+            }
+            Some("--value_column") => {
+                let Some(value) = args.get(index + 1).and_then(|arg| arg.to_str()) else {
+                    return Err(String::from("missing value after --value_column").into());
+                };
+                value_column = Some(value.to_string());
+                index += 2;
+            }
+            Some("--time_scale") => {
+                let Some(value) = args.get(index + 1).and_then(|arg| arg.to_str()) else {
+                    return Err(String::from("missing value after --time_scale").into());
+                };
+                time_scale = Some(value.parse::<f64>()?);
+                index += 2;
+            }
+            Some("--output") => {
+                let Some(value) = args.get(index + 1) else {
+                    return Err(String::from("missing value after --output").into());
+                };
+                output = Some(PathBuf::from(value));
+                index += 2;
+            }
+            Some(other) => {
+                return Err(format!("unexpected argument for csv_pseudo_diff: {other}").into());
+            }
+            None => return Err(String::from("arguments must be valid UTF-8").into()),
+        }
+    }
+
+    let Some(time_column) = time_column else {
+        return Err(String::from("csv_pseudo_diff requires --time_column NAME").into());
+    };
+    let Some(value_column) = value_column else {
+        return Err(String::from("csv_pseudo_diff requires --value_column NAME").into());
+    };
+    let Some(time_scale) = time_scale else {
+        return Err(String::from("csv_pseudo_diff requires --time_scale VALUE").into());
+    };
+
+    Ok(Command::CsvPseudoDiff {
+        input,
+        time_column,
+        value_column,
+        time_scale,
+        output,
+    })
+}
+
 fn usage() -> &'static str {
     concat!(
         "usage:\n",
         "  my_dev_tools csv_key_diff LEFT RIGHT --key KEY [--key KEY ...]\n",
-        "  my_dev_tools csv_key_diff_extract LEFT RIGHT DIFF --output_left PATH --output_right PATH\n"
+        "  my_dev_tools csv_key_diff_extract LEFT RIGHT DIFF --output_left PATH --output_right PATH\n",
+        "  my_dev_tools csv_pseudo_diff INPUT --time_column NAME --value_column NAME --time_scale VALUE [--output PATH]\n"
     )
 }
 
@@ -219,6 +315,34 @@ mod tests {
                 diff: PathBuf::from("diff.txt"),
                 output_left: PathBuf::from("left_out.csv"),
                 output_right: PathBuf::from("right_out.csv"),
+            }
+        );
+    }
+
+    #[test]
+    fn parses_csv_pseudo_diff_command() {
+        let command = parse_args(os_args(&[
+            "csv_pseudo_diff",
+            "input.csv",
+            "--time_column",
+            "t",
+            "--value_column",
+            "x",
+            "--time_scale",
+            "0.5",
+            "--output",
+            "out.csv",
+        ]))
+        .unwrap();
+
+        assert_eq!(
+            command,
+            Command::CsvPseudoDiff {
+                input: PathBuf::from("input.csv"),
+                time_column: String::from("t"),
+                value_column: String::from("x"),
+                time_scale: 0.5,
+                output: Some(PathBuf::from("out.csv")),
             }
         );
     }
