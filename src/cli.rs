@@ -3,6 +3,8 @@ use std::error::Error;
 use std::ffi::OsString;
 use std::path::PathBuf;
 
+#[cfg(feature = "plot")]
+use crate::tools::csv_plot;
 use crate::tools::{csv_key_diff, csv_key_diff_extract, csv_pseudo_diff};
 
 #[derive(Debug, PartialEq)]
@@ -25,6 +27,12 @@ enum Command {
         value_column: String,
         time_scale: f64,
         output: Option<PathBuf>,
+    },
+    #[cfg(feature = "plot")]
+    CsvPlot {
+        input: PathBuf,
+        x_column: String,
+        y_columns: Vec<String>,
     },
 }
 
@@ -74,6 +82,12 @@ fn run_from_args(args: Vec<OsString>) -> Result<i32, Box<dyn Error>> {
             )?;
             Ok(0)
         }
+        #[cfg(feature = "plot")]
+        Command::CsvPlot {
+            input,
+            x_column,
+            y_columns,
+        } => run_csv_plot(&input, &x_column, &y_columns),
     }
 }
 
@@ -86,6 +100,8 @@ fn parse_args(args: Vec<OsString>) -> Result<Command, Box<dyn Error>> {
         "csv_key_diff" => parse_csv_key_diff(&args[1..]),
         "csv_key_diff_extract" => parse_csv_key_diff_extract(&args[1..]),
         "csv_pseudo_diff" => parse_csv_pseudo_diff(&args[1..]),
+        #[cfg(feature = "plot")]
+        "csv_plot" => parse_csv_plot(&args[1..]),
         _ => Err(format!("unknown command: {command}\n\n{}", usage()).into()),
     }
 }
@@ -185,7 +201,7 @@ fn parse_csv_key_diff_extract(args: &[OsString]) -> Result<Command, Box<dyn Erro
 fn parse_csv_pseudo_diff(args: &[OsString]) -> Result<Command, Box<dyn Error>> {
     if args.is_empty() {
         return Err(String::from(
-            "csv_pseudo_diff requires INPUT --time_column NAME --value_column NAME --time_scale VALUE",
+            "csv_pseudo_diff requires INPUT --time-column NAME --value-column NAME --time-scale VALUE",
         )
         .into());
     }
@@ -199,23 +215,23 @@ fn parse_csv_pseudo_diff(args: &[OsString]) -> Result<Command, Box<dyn Error>> {
 
     while index < args.len() {
         match args[index].to_str() {
-            Some("--time_column") => {
+            Some("--time-column") => {
                 let Some(value) = args.get(index + 1).and_then(|arg| arg.to_str()) else {
-                    return Err(String::from("missing value after --time_column").into());
+                    return Err(String::from("missing value after --time-column").into());
                 };
                 time_column = Some(value.to_string());
                 index += 2;
             }
-            Some("--value_column") => {
+            Some("--value-column") => {
                 let Some(value) = args.get(index + 1).and_then(|arg| arg.to_str()) else {
-                    return Err(String::from("missing value after --value_column").into());
+                    return Err(String::from("missing value after --value-column").into());
                 };
                 value_column = Some(value.to_string());
                 index += 2;
             }
-            Some("--time_scale") => {
+            Some("--time-scale") => {
                 let Some(value) = args.get(index + 1).and_then(|arg| arg.to_str()) else {
-                    return Err(String::from("missing value after --time_scale").into());
+                    return Err(String::from("missing value after --time-scale").into());
                 };
                 time_scale = Some(value.parse::<f64>()?);
                 index += 2;
@@ -235,13 +251,13 @@ fn parse_csv_pseudo_diff(args: &[OsString]) -> Result<Command, Box<dyn Error>> {
     }
 
     let Some(time_column) = time_column else {
-        return Err(String::from("csv_pseudo_diff requires --time_column NAME").into());
+        return Err(String::from("csv_pseudo_diff requires --time-column NAME").into());
     };
     let Some(value_column) = value_column else {
-        return Err(String::from("csv_pseudo_diff requires --value_column NAME").into());
+        return Err(String::from("csv_pseudo_diff requires --value-column NAME").into());
     };
     let Some(time_scale) = time_scale else {
-        return Err(String::from("csv_pseudo_diff requires --time_scale VALUE").into());
+        return Err(String::from("csv_pseudo_diff requires --time-scale VALUE").into());
     };
 
     Ok(Command::CsvPseudoDiff {
@@ -253,13 +269,98 @@ fn parse_csv_pseudo_diff(args: &[OsString]) -> Result<Command, Box<dyn Error>> {
     })
 }
 
+#[cfg(feature = "plot")]
+fn parse_csv_plot(args: &[OsString]) -> Result<Command, Box<dyn Error>> {
+    if args.is_empty() {
+        return Err(String::from(
+            "csv_plot requires INPUT --x-column NAME --y-columns NAME[,NAME...]",
+        )
+        .into());
+    }
+
+    let input = PathBuf::from(&args[0]);
+    let mut x_column = None;
+    let mut y_columns = Vec::new();
+    let mut index = 1;
+
+    while index < args.len() {
+        match args[index].to_str() {
+            Some("--x-column") => {
+                let Some(value) = args.get(index + 1).and_then(|arg| arg.to_str()) else {
+                    return Err(String::from("missing value after --x-column").into());
+                };
+                x_column = Some(value.to_string());
+                index += 2;
+            }
+            Some("--y-columns") => {
+                let Some(value) = args.get(index + 1).and_then(|arg| arg.to_str()) else {
+                    return Err(String::from("missing value after --y-columns").into());
+                };
+                extend_unique_names(&mut y_columns, value);
+                index += 2;
+            }
+            Some(other) => return Err(format!("unexpected argument for csv_plot: {other}").into()),
+            None => return Err(String::from("arguments must be valid UTF-8").into()),
+        }
+    }
+
+    let Some(x_column) = x_column else {
+        return Err(String::from("csv_plot requires --x-column NAME").into());
+    };
+    if y_columns.is_empty() {
+        return Err(String::from("csv_plot requires --y-columns NAME[,NAME...]").into());
+    }
+
+    Ok(Command::CsvPlot {
+        input,
+        x_column,
+        y_columns,
+    })
+}
+
+#[cfg(feature = "plot")]
+fn extend_unique_names(target: &mut Vec<String>, value: &str) {
+    for name in value
+        .split(',')
+        .map(str::trim)
+        .filter(|name| !name.is_empty())
+    {
+        if !target.iter().any(|existing| existing == name) {
+            target.push(name.to_string());
+        }
+    }
+}
+
+#[cfg(feature = "plot")]
+fn run_csv_plot(
+    input: &PathBuf,
+    x_column: &str,
+    y_columns: &[String],
+) -> Result<i32, Box<dyn Error>> {
+    csv_plot::run(input, x_column, y_columns)?;
+    Ok(0)
+}
+
 fn usage() -> &'static str {
-    concat!(
-        "usage:\n",
-        "  my_dev_tools csv_key_diff LEFT RIGHT --key KEY [--key KEY ...]\n",
-        "  my_dev_tools csv_key_diff_extract LEFT RIGHT DIFF --output_left PATH --output_right PATH\n",
-        "  my_dev_tools csv_pseudo_diff INPUT --time_column NAME --value_column NAME --time_scale VALUE [--output PATH]\n"
-    )
+    #[cfg(feature = "plot")]
+    {
+        concat!(
+            "usage:\n",
+            "  my_dev_tools csv_key_diff LEFT RIGHT --key KEY [--key KEY ...]\n",
+            "  my_dev_tools csv_key_diff_extract LEFT RIGHT DIFF --output_left PATH --output_right PATH\n",
+            "  my_dev_tools csv_pseudo_diff INPUT --time-column NAME --value-column NAME --time-scale VALUE [--output PATH]\n",
+            "  my_dev_tools csv_plot INPUT --x-column NAME --y-columns NAME[,NAME...]\n"
+        )
+    }
+    #[cfg(not(feature = "plot"))]
+    {
+        concat!(
+            "usage:\n",
+            "  my_dev_tools csv_key_diff LEFT RIGHT --key KEY [--key KEY ...]\n",
+            "  my_dev_tools csv_key_diff_extract LEFT RIGHT DIFF --output_left PATH --output_right PATH\n",
+            "  my_dev_tools csv_pseudo_diff INPUT --time-column NAME --value-column NAME --time-scale VALUE [--output PATH]\n"
+        )
+    }
 }
 
 #[cfg(test)]
@@ -324,11 +425,11 @@ mod tests {
         let command = parse_args(os_args(&[
             "csv_pseudo_diff",
             "input.csv",
-            "--time_column",
+            "--time-column",
             "t",
-            "--value_column",
+            "--value-column",
             "x",
-            "--time_scale",
+            "--time-scale",
             "0.5",
             "--output",
             "out.csv",
@@ -343,6 +444,54 @@ mod tests {
                 value_column: String::from("x"),
                 time_scale: 0.5,
                 output: Some(PathBuf::from("out.csv")),
+            }
+        );
+    }
+
+    #[cfg(feature = "plot")]
+    #[test]
+    fn parses_csv_plot_command() {
+        let command = parse_args(os_args(&[
+            "csv_plot",
+            "input.csv",
+            "--x-column",
+            "stamp",
+            "--y-columns",
+            "signal, velocity",
+        ]))
+        .unwrap();
+
+        assert_eq!(
+            command,
+            Command::CsvPlot {
+                input: PathBuf::from("input.csv"),
+                x_column: String::from("stamp"),
+                y_columns: vec![String::from("signal"), String::from("velocity")],
+            }
+        );
+    }
+
+    #[cfg(feature = "plot")]
+    #[test]
+    fn parses_csv_plot_command_with_repeated_y_columns() {
+        let command = parse_args(os_args(&[
+            "csv_plot",
+            "input.csv",
+            "--x-column",
+            "stamp",
+            "--y-columns",
+            "signal",
+            "--y-columns",
+            "velocity,signal",
+        ]))
+        .unwrap();
+
+        assert_eq!(
+            command,
+            Command::CsvPlot {
+                input: PathBuf::from("input.csv"),
+                x_column: String::from("stamp"),
+                y_columns: vec![String::from("signal"), String::from("velocity")],
             }
         );
     }

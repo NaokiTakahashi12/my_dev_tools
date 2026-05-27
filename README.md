@@ -35,13 +35,35 @@ cargo run -- csv_key_diff_extract left.csv right.csv diff.txt \
 
 ```bash
 cargo run -- csv_pseudo_diff input.csv \
-  --time_column stamp \
-  --value_column signal \
-  --time_scale 1.0
+  --time-column stamp \
+  --value-column signal \
+  --time-scale 1.0
 
 cargo run -- csv_pseudo_diff input.csv \
-  --time_column stamp \
-  --value_column signal \
-  --time_scale 1.0 \
+  --time-column stamp \
+  --value-column signal \
+  --time-scale 1.0 \
   --output pseudo_diff.csv
 ```
+
+## csv_plot
+
+指定した `x` 列と `y` 列をターミナル上でプロットします。`ratatui` を使うため、このコマンドだけは `plot` feature を有効にしてビルドする必要があります。
+
+```bash
+cargo run --features plot -- csv_plot input.csv \
+  --x-column stamp \
+  --y-columns signal,velocity
+```
+
+プロット画面は `q`、`Esc`、`Enter` で終了します。`plot` feature なしでビルドしたバイナリでは、このコマンドは「plot support なし」と表示して実行されません。
+
+操作:
+
+- `←` / `h`, `→` / `l`: X方向へ移動
+- `↑` / `k`, `↓` / `j`: Y方向へ移動
+- `+` / `=`: X/Y 同時にズームイン
+- `-`: X/Y 同時にズームアウト
+- `x` / `X`: X方向だけズームイン / アウト
+- `y` / `Y`: Y方向だけズームイン / アウト
+- `0`: 表示範囲を全体表示にリセット
