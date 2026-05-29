@@ -60,6 +60,7 @@ cargo run --features plot -- csv_plot input.csv \
 
 操作:
 
+- `d`: `dy/dx` の派生系列パネルを下段に表示/非表示
 - `←` / `h`, `→` / `l`: X方向へ移動
 - `↑` / `k`, `↓` / `j`: Y方向へ移動
 - `+` / `=`: X/Y 同時にズームイン

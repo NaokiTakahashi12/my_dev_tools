@@ -7,13 +7,13 @@ use crossterm::execute;
 use crossterm::terminal::{
     EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
 };
-use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
 use ratatui::layout::{Constraint, Layout};
 use ratatui::style::{Color, Style};
 use ratatui::symbols::Marker;
 use ratatui::text::Line;
 use ratatui::widgets::{Axis, Block, Borders, Chart, Dataset, GraphType, Paragraph};
+use ratatui::{Frame, Terminal};
 
 use super::csv_key_diff::read_csv;
 
@@ -31,8 +31,10 @@ const SERIES_COLORS: [Color; 6] = [
 struct PlotData {
     x_column: String,
     series: Vec<PlotSeries>,
+    derivative_series: Vec<PlotSeries>,
     x_bounds: [f64; 2],
     y_bounds: [f64; 2],
+    derivative_y_bounds: [f64; 2],
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -45,6 +47,13 @@ struct PlotSeries {
 struct Viewport {
     x_bounds: [f64; 2],
     y_bounds: [f64; 2],
+}
+
+#[derive(Debug, Clone, PartialEq)]
+struct PlotState {
+    main_viewport: Viewport,
+    derivative_y_bounds: [f64; 2],
+    show_derivative: bool,
 }
 
 pub fn run(input_path: &Path, x_column: &str, y_columns: &[String]) -> Result<(), Box<dyn Error>> {
@@ -100,12 +109,25 @@ fn load_plot_data(
         item.points
             .sort_by(|left, right| left.0.total_cmp(&right.0));
     }
+    let derivative_series = series
+        .iter()
+        .map(|series| PlotSeries {
+            y_column: format!("d({})/d{}", series.y_column, x_column),
+            points: compute_derivative_points(&series.points),
+        })
+        .collect::<Vec<_>>();
+    let derivative_y_values = derivative_series
+        .iter()
+        .flat_map(|series| series.points.iter().map(|(_, y)| *y))
+        .collect::<Vec<_>>();
 
     Ok(PlotData {
         x_column: x_column.to_string(),
         series,
+        derivative_series,
         x_bounds: axis_bounds(x_values.into_iter()),
         y_bounds: axis_bounds(y_values.into_iter()),
+        derivative_y_bounds: axis_bounds_or_default(derivative_y_values.into_iter(), [-1.0, 1.0]),
     })
 }
 
@@ -132,69 +154,54 @@ fn draw_plot(
     terminal: &mut Terminal<CrosstermBackend<std::io::Stdout>>,
     plot: &PlotData,
 ) -> Result<(), Box<dyn Error>> {
-    let mut viewport = Viewport {
-        x_bounds: plot.x_bounds,
-        y_bounds: plot.y_bounds,
+    let mut state = PlotState {
+        main_viewport: Viewport {
+            x_bounds: plot.x_bounds,
+            y_bounds: plot.y_bounds,
+        },
+        derivative_y_bounds: plot.derivative_y_bounds,
+        show_derivative: false,
     };
 
     loop {
         terminal.draw(|frame| {
             let area = frame.area();
-            let [chart_area, help_area] =
+            let [content_area, help_area] =
                 Layout::vertical([Constraint::Min(1), Constraint::Length(1)]).areas(area);
-
-            let x_labels = axis_labels(viewport.x_bounds);
-            let y_labels = axis_labels(viewport.y_bounds);
-            let sampled_series = plot
-                .series
-                .iter()
-                .map(|series| visible_points(&series.points, viewport.x_bounds, chart_area.width))
-                .collect::<Vec<_>>();
-            let datasets = plot
-                .series
-                .iter()
-                .zip(sampled_series.iter())
-                .enumerate()
-                .map(|(index, (series, sampled_points))| {
-                    Dataset::default()
-                        .name(series.y_column.as_str())
-                        .marker(Marker::Braille)
-                        .graph_type(GraphType::Line)
-                        .style(Style::default().fg(SERIES_COLORS[index % SERIES_COLORS.len()]))
-                        .data(sampled_points)
-                })
-                .collect::<Vec<_>>();
-            let chart = Chart::new(datasets)
-                .block(
-                    Block::default()
-                        .title(format!(
-                            "{} vs {}",
-                            plot.series
-                                .iter()
-                                .map(|series| series.y_column.as_str())
-                                .collect::<Vec<_>>()
-                                .join(", "),
-                            plot.x_column
-                        ))
-                        .borders(Borders::ALL),
-                )
-                .x_axis(
-                    Axis::default()
-                        .title(Line::from(plot.x_column.clone()))
-                        .bounds(viewport.x_bounds)
-                        .labels(x_labels),
-                )
-                .y_axis(
-                    Axis::default()
-                        .title(Line::from("y"))
-                        .bounds(viewport.y_bounds)
-                        .labels(y_labels),
-                );
+            let (main_area, derivative_area) = if state.show_derivative {
+                let [main, derivative] = Layout::vertical([
+                    Constraint::Percentage(50),
+                    Constraint::Percentage(50),
+                ])
+                .areas(content_area);
+                (main, Some(derivative))
+            } else {
+                (content_area, None)
+            };
             let help = Paragraph::new(
-                "q/Esc/Enter: exit  arrows/hjkl: pan  +/-: zoom  x/X: x zoom  y/Y: y zoom  0: reset",
+                "q/Esc/Enter: exit  d: derivative panel  arrows/hjkl: pan  +/-: zoom  x/X: x zoom  y/Y: y zoom  0: reset",
             );
 
-            frame.render_widget(chart, chart_area);
+            render_chart(
+                frame,
+                main_area,
+                &plot.series,
+                &plot.x_column,
+                "y",
+                state.main_viewport.x_bounds,
+                state.main_viewport.y_bounds,
+            );
+            if let Some(derivative_area) = derivative_area {
+                render_chart(
+                    frame,
+                    derivative_area,
+                    &plot.derivative_series,
+                    &plot.x_column,
+                    "dy/dx",
+                    state.main_viewport.x_bounds,
+                    state.derivative_y_bounds,
+                );
+            }
             frame.render_widget(help, help_area);
         })?;
 
@@ -206,33 +213,73 @@ fn draw_plot(
                 return Ok(());
             }
             Event::Key(key) if key.kind == KeyEventKind::Press => match key.code {
+                KeyCode::Char('d') => state.show_derivative = !state.show_derivative,
                 KeyCode::Left | KeyCode::Char('h') => {
-                    pan_bounds(&mut viewport.x_bounds, plot.x_bounds, -0.1)
+                    pan_bounds(&mut state.main_viewport.x_bounds, plot.x_bounds, -0.1)
                 }
                 KeyCode::Right | KeyCode::Char('l') => {
-                    pan_bounds(&mut viewport.x_bounds, plot.x_bounds, 0.1)
+                    pan_bounds(&mut state.main_viewport.x_bounds, plot.x_bounds, 0.1)
                 }
                 KeyCode::Down | KeyCode::Char('j') => {
-                    pan_bounds(&mut viewport.y_bounds, plot.y_bounds, -0.1)
+                    pan_bounds(&mut state.main_viewport.y_bounds, plot.y_bounds, -0.1);
+                    pan_bounds(
+                        &mut state.derivative_y_bounds,
+                        plot.derivative_y_bounds,
+                        -0.1,
+                    );
                 }
                 KeyCode::Up | KeyCode::Char('k') => {
-                    pan_bounds(&mut viewport.y_bounds, plot.y_bounds, 0.1)
+                    pan_bounds(&mut state.main_viewport.y_bounds, plot.y_bounds, 0.1);
+                    pan_bounds(
+                        &mut state.derivative_y_bounds,
+                        plot.derivative_y_bounds,
+                        0.1,
+                    );
                 }
                 KeyCode::Char('+') | KeyCode::Char('=') => {
-                    zoom_bounds(&mut viewport.x_bounds, plot.x_bounds, 0.8);
-                    zoom_bounds(&mut viewport.y_bounds, plot.y_bounds, 0.8);
+                    zoom_bounds(&mut state.main_viewport.x_bounds, plot.x_bounds, 0.8);
+                    zoom_bounds(&mut state.main_viewport.y_bounds, plot.y_bounds, 0.8);
+                    zoom_bounds(
+                        &mut state.derivative_y_bounds,
+                        plot.derivative_y_bounds,
+                        0.8,
+                    );
                 }
                 KeyCode::Char('-') => {
-                    zoom_bounds(&mut viewport.x_bounds, plot.x_bounds, 1.25);
-                    zoom_bounds(&mut viewport.y_bounds, plot.y_bounds, 1.25);
+                    zoom_bounds(&mut state.main_viewport.x_bounds, plot.x_bounds, 1.25);
+                    zoom_bounds(&mut state.main_viewport.y_bounds, plot.y_bounds, 1.25);
+                    zoom_bounds(
+                        &mut state.derivative_y_bounds,
+                        plot.derivative_y_bounds,
+                        1.25,
+                    );
                 }
-                KeyCode::Char('x') => zoom_bounds(&mut viewport.x_bounds, plot.x_bounds, 0.8),
-                KeyCode::Char('X') => zoom_bounds(&mut viewport.x_bounds, plot.x_bounds, 1.25),
-                KeyCode::Char('y') => zoom_bounds(&mut viewport.y_bounds, plot.y_bounds, 0.8),
-                KeyCode::Char('Y') => zoom_bounds(&mut viewport.y_bounds, plot.y_bounds, 1.25),
+                KeyCode::Char('x') => {
+                    zoom_bounds(&mut state.main_viewport.x_bounds, plot.x_bounds, 0.8)
+                }
+                KeyCode::Char('X') => {
+                    zoom_bounds(&mut state.main_viewport.x_bounds, plot.x_bounds, 1.25)
+                }
+                KeyCode::Char('y') => {
+                    zoom_bounds(&mut state.main_viewport.y_bounds, plot.y_bounds, 0.8);
+                    zoom_bounds(
+                        &mut state.derivative_y_bounds,
+                        plot.derivative_y_bounds,
+                        0.8,
+                    );
+                }
+                KeyCode::Char('Y') => {
+                    zoom_bounds(&mut state.main_viewport.y_bounds, plot.y_bounds, 1.25);
+                    zoom_bounds(
+                        &mut state.derivative_y_bounds,
+                        plot.derivative_y_bounds,
+                        1.25,
+                    );
+                }
                 KeyCode::Char('0') => {
-                    viewport.x_bounds = plot.x_bounds;
-                    viewport.y_bounds = plot.y_bounds;
+                    state.main_viewport.x_bounds = plot.x_bounds;
+                    state.main_viewport.y_bounds = plot.y_bounds;
+                    state.derivative_y_bounds = plot.derivative_y_bounds;
                 }
                 _ => {}
             },
@@ -240,6 +287,65 @@ fn draw_plot(
             _ => {}
         }
     }
+}
+
+fn render_chart(
+    frame: &mut Frame,
+    area: ratatui::layout::Rect,
+    series: &[PlotSeries],
+    x_column: &str,
+    y_label: &str,
+    x_bounds: [f64; 2],
+    y_bounds: [f64; 2],
+) {
+    let x_labels = axis_labels(x_bounds);
+    let y_labels = axis_labels(y_bounds);
+    let sampled_series = series
+        .iter()
+        .map(|series| visible_points(&series.points, x_bounds, area.width))
+        .collect::<Vec<_>>();
+    let datasets = series
+        .iter()
+        .zip(sampled_series.iter())
+        .enumerate()
+        .map(|(index, (series, sampled_points))| {
+            Dataset::default()
+                .name(series.y_column.as_str())
+                .marker(Marker::Braille)
+                .graph_type(GraphType::Line)
+                .style(Style::default().fg(SERIES_COLORS[index % SERIES_COLORS.len()]))
+                .data(sampled_points)
+        })
+        .collect::<Vec<_>>();
+
+    let chart = Chart::new(datasets)
+        .block(
+            Block::default()
+                .title(format!(
+                    "{} vs {}",
+                    series
+                        .iter()
+                        .map(|series| series.y_column.as_str())
+                        .collect::<Vec<_>>()
+                        .join(", "),
+                    x_column
+                ))
+                .borders(Borders::ALL),
+        )
+        .x_axis(
+            Axis::default()
+                .title(Line::from(x_column.to_string()))
+                .bounds(x_bounds)
+                .labels(x_labels),
+        )
+        .y_axis(
+            Axis::default()
+                .title(Line::from(y_label.to_string()))
+                .bounds(y_bounds)
+                .labels(y_labels),
+        );
+
+    frame.render_widget(chart, area);
 }
 
 fn axis_labels(bounds: [f64; 2]) -> Vec<Line<'static>> {
@@ -261,6 +367,27 @@ fn axis_bounds(values: impl Iterator<Item = f64>) -> [f64; 2] {
     } else {
         [min, max]
     }
+}
+
+fn axis_bounds_or_default(values: impl Iterator<Item = f64>, default: [f64; 2]) -> [f64; 2] {
+    let collected = values.collect::<Vec<_>>();
+    if collected.is_empty() {
+        default
+    } else {
+        axis_bounds(collected.into_iter())
+    }
+}
+
+fn compute_derivative_points(points: &[(f64, f64)]) -> Vec<(f64, f64)> {
+    points
+        .windows(2)
+        .filter_map(|window| {
+            let (x0, y0) = window[0];
+            let (x1, y1) = window[1];
+            let dx = x1 - x0;
+            (dx.is_finite() && dx != 0.0).then_some((x1, (y1 - y0) / dx))
+        })
+        .collect()
 }
 
 fn visible_points(points: &[(f64, f64)], x_bounds: [f64; 2], chart_width: u16) -> Vec<(f64, f64)> {
@@ -387,8 +514,11 @@ mod tests {
 
         assert_eq!(plot.series[0].points, vec![(0.0, 1.0), (1.0, 3.0)]);
         assert_eq!(plot.series[1].points, vec![(0.0, 2.0), (1.0, 4.0)]);
+        assert_eq!(plot.derivative_series[0].points, vec![(1.0, 2.0)]);
+        assert_eq!(plot.derivative_series[1].points, vec![(1.0, 2.0)]);
         assert_eq!(plot.x_bounds, [0.0, 1.0]);
         assert_eq!(plot.y_bounds, [1.0, 4.0]);
+        assert_eq!(plot.derivative_y_bounds, [1.0, 3.0]);
     }
 
     #[test]
@@ -426,8 +556,10 @@ mod tests {
                 y_column: String::from("y"),
                 points: vec![(0.0, 0.0), (1.0, 1.0), (2.0, 4.0), (3.0, 9.0)],
             }],
+            derivative_series: Vec::new(),
             x_bounds: [0.0, 3.0],
             y_bounds: [0.0, 9.0],
+            derivative_y_bounds: [-1.0, 1.0],
         };
 
         assert_eq!(
@@ -444,8 +576,10 @@ mod tests {
                 y_column: String::from("y"),
                 points: (0..100).map(|i| (i as f64, i as f64)).collect(),
             }],
+            derivative_series: Vec::new(),
             x_bounds: [0.0, 99.0],
             y_bounds: [0.0, 99.0],
+            derivative_y_bounds: [-1.0, 1.0],
         };
 
         let sampled = visible_points(&plot.series[0].points, [0.0, 99.0], 20);
@@ -453,5 +587,13 @@ mod tests {
         assert!(sampled.len() <= usize::from(20_u16.saturating_sub(HORIZONTAL_MARGIN)) + 1);
         assert_eq!(sampled.first(), Some(&(0.0, 0.0)));
         assert_eq!(sampled.last(), Some(&(99.0, 99.0)));
+    }
+
+    #[test]
+    fn computes_derivative_points() {
+        assert_eq!(
+            compute_derivative_points(&[(0.0, 1.0), (0.5, 2.0), (1.0, 5.0)]),
+            vec![(0.5, 2.0), (1.0, 6.0)]
+        );
     }
 }
