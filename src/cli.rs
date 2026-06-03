@@ -5,7 +5,7 @@ use std::path::PathBuf;
 
 #[cfg(feature = "plot")]
 use crate::tools::csv_plot;
-use crate::tools::{csv_key_diff, csv_key_diff_extract, csv_pseudo_diff};
+use crate::tools::{csv_anomaly_detect, csv_key_diff, csv_key_diff_extract, csv_pseudo_diff};
 
 #[derive(Debug, PartialEq)]
 enum Command {
@@ -27,6 +27,11 @@ enum Command {
         value_column: String,
         time_scale: f64,
         output: Option<PathBuf>,
+    },
+    CsvAnomalyDetect {
+        input: PathBuf,
+        x_column: String,
+        y_columns: Vec<String>,
     },
     #[cfg(feature = "plot")]
     CsvPlot {
@@ -82,6 +87,14 @@ fn run_from_args(args: Vec<OsString>) -> Result<i32, Box<dyn Error>> {
             )?;
             Ok(0)
         }
+        Command::CsvAnomalyDetect {
+            input,
+            x_column,
+            y_columns,
+        } => {
+            csv_anomaly_detect::run(&input, &x_column, &y_columns)?;
+            Ok(0)
+        }
         #[cfg(feature = "plot")]
         Command::CsvPlot {
             input,
@@ -100,6 +113,7 @@ fn parse_args(args: Vec<OsString>) -> Result<Command, Box<dyn Error>> {
         "csv_key_diff" => parse_csv_key_diff(&args[1..]),
         "csv_key_diff_extract" => parse_csv_key_diff_extract(&args[1..]),
         "csv_pseudo_diff" => parse_csv_pseudo_diff(&args[1..]),
+        "csv_anomaly_detect" => parse_csv_anomaly_detect(&args[1..]),
         #[cfg(feature = "plot")]
         "csv_plot" => parse_csv_plot(&args[1..]),
         _ => Err(format!("unknown command: {command}\n\n{}", usage()).into()),
@@ -269,6 +283,68 @@ fn parse_csv_pseudo_diff(args: &[OsString]) -> Result<Command, Box<dyn Error>> {
     })
 }
 
+fn parse_csv_anomaly_detect(args: &[OsString]) -> Result<Command, Box<dyn Error>> {
+    if args.is_empty() {
+        return Err(String::from(
+            "csv_anomaly_detect requires INPUT --x-column NAME --y-columns NAME[,NAME...]",
+        )
+        .into());
+    }
+
+    let input = PathBuf::from(&args[0]);
+    let mut x_column = None;
+    let mut y_columns = Vec::new();
+    let mut index = 1;
+
+    while index < args.len() {
+        match args[index].to_str() {
+            Some("--x-column") => {
+                let Some(value) = args.get(index + 1).and_then(|arg| arg.to_str()) else {
+                    return Err(String::from("missing value after --x-column").into());
+                };
+                x_column = Some(value.to_string());
+                index += 2;
+            }
+            Some("--y-columns") => {
+                let Some(value) = args.get(index + 1).and_then(|arg| arg.to_str()) else {
+                    return Err(String::from("missing value after --y-columns").into());
+                };
+                extend_unique_names(&mut y_columns, value);
+                index += 2;
+            }
+            Some(other) => {
+                return Err(format!("unexpected argument for csv_anomaly_detect: {other}").into());
+            }
+            None => return Err(String::from("arguments must be valid UTF-8").into()),
+        }
+    }
+
+    let Some(x_column) = x_column else {
+        return Err(String::from("csv_anomaly_detect requires --x-column NAME").into());
+    };
+    if y_columns.is_empty() {
+        return Err(String::from("csv_anomaly_detect requires --y-columns NAME[,NAME...]").into());
+    }
+
+    Ok(Command::CsvAnomalyDetect {
+        input,
+        x_column,
+        y_columns,
+    })
+}
+
+fn extend_unique_names(target: &mut Vec<String>, value: &str) {
+    for name in value
+        .split(',')
+        .map(str::trim)
+        .filter(|name| !name.is_empty())
+    {
+        if !target.iter().any(|existing| existing == name) {
+            target.push(name.to_string());
+        }
+    }
+}
+
 #[cfg(feature = "plot")]
 fn parse_csv_plot(args: &[OsString]) -> Result<Command, Box<dyn Error>> {
     if args.is_empty() {
@@ -319,19 +395,6 @@ fn parse_csv_plot(args: &[OsString]) -> Result<Command, Box<dyn Error>> {
 }
 
 #[cfg(feature = "plot")]
-fn extend_unique_names(target: &mut Vec<String>, value: &str) {
-    for name in value
-        .split(',')
-        .map(str::trim)
-        .filter(|name| !name.is_empty())
-    {
-        if !target.iter().any(|existing| existing == name) {
-            target.push(name.to_string());
-        }
-    }
-}
-
-#[cfg(feature = "plot")]
 fn run_csv_plot(
     input: &PathBuf,
     x_column: &str,
@@ -346,6 +409,7 @@ fn usage() -> &'static str {
     {
         concat!(
             "usage:\n",
+            "  my_dev_tools csv_anomaly_detect INPUT --x-column NAME --y-columns NAME[,NAME...]\n",
             "  my_dev_tools csv_key_diff LEFT RIGHT --key KEY [--key KEY ...]\n",
             "  my_dev_tools csv_key_diff_extract LEFT RIGHT DIFF --output_left PATH --output_right PATH\n",
             "  my_dev_tools csv_pseudo_diff INPUT --time-column NAME --value-column NAME --time-scale VALUE [--output PATH]\n",
@@ -356,6 +420,7 @@ fn usage() -> &'static str {
     {
         concat!(
             "usage:\n",
+            "  my_dev_tools csv_anomaly_detect INPUT --x-column NAME --y-columns NAME[,NAME...]\n",
             "  my_dev_tools csv_key_diff LEFT RIGHT --key KEY [--key KEY ...]\n",
             "  my_dev_tools csv_key_diff_extract LEFT RIGHT DIFF --output_left PATH --output_right PATH\n",
             "  my_dev_tools csv_pseudo_diff INPUT --time-column NAME --value-column NAME --time-scale VALUE [--output PATH]\n"
@@ -444,6 +509,28 @@ mod tests {
                 value_column: String::from("x"),
                 time_scale: 0.5,
                 output: Some(PathBuf::from("out.csv")),
+            }
+        );
+    }
+
+    #[test]
+    fn parses_csv_anomaly_detect_command() {
+        let command = parse_args(os_args(&[
+            "csv_anomaly_detect",
+            "input.csv",
+            "--x-column",
+            "stamp",
+            "--y-columns",
+            "signal, velocity",
+        ]))
+        .unwrap();
+
+        assert_eq!(
+            command,
+            Command::CsvAnomalyDetect {
+                input: PathBuf::from("input.csv"),
+                x_column: String::from("stamp"),
+                y_columns: vec![String::from("signal"), String::from("velocity")],
             }
         );
     }

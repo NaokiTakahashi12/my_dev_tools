@@ -46,6 +46,21 @@ cargo run -- csv_pseudo_diff input.csv \
   --output pseudo_diff.csv
 ```
 
+## csv_anomaly_detect
+
+指定した `x` 列に対する局所トレンドからの乖離を見て、元CSVに異常ラベル列を追加したCSVを標準出力します。各 `y` 列について `*_anomaly_mask` 列を追加し、正常なら `0`、異常ならビットマスクを出力します。`x` 列は時系列順に単調増加している必要があり、追加されるラベル列名が既存ヘッダと衝突する場合はエラーにします。
+
+ビット定義:
+
+- `1`: 正方向スパイク
+- `2`: 負方向スパイク
+
+```bash
+cargo run -- csv_anomaly_detect input.csv \
+  --x-column stamp \
+  --y-columns signal,velocity
+```
+
 ## csv_plot
 
 指定した `x` 列と `y` 列をターミナル上でプロットします。`ratatui` を使うため、このコマンドだけは `plot` feature を有効にしてビルドする必要があります。
