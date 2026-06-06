@@ -139,6 +139,8 @@ fn parse_f64_cell(value: &str, column_name: &str, row_index: usize) -> Result<f6
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::tools::test_support::{temp_path, write_zst_file};
+    use std::fs;
 
     #[test]
     fn computes_pseudo_diff_rows() {
@@ -206,5 +208,18 @@ mod tests {
         ];
 
         assert!(compute_pseudo_diff_rows(&headers, &rows, "t", "x", 1.0).is_err());
+    }
+
+    #[test]
+    fn reads_zst_csv_input() {
+        let path = temp_path("pseudo.csv.zst");
+        write_zst_file(&path, "t,x\n0.0,1.0\n1.0,3.0\n").unwrap();
+
+        let csv = read_csv(&path).unwrap();
+        let output = compute_pseudo_diff_rows(&csv.headers, &csv.rows, "t", "x", 1.0).unwrap();
+
+        assert_eq!(output[1].pseudo_diff, String::from("2"));
+
+        let _ = fs::remove_file(path);
     }
 }

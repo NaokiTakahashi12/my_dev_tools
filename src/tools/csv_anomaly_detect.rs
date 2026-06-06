@@ -245,6 +245,8 @@ fn parse_cell(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::tools::test_support::{temp_path, write_tar_zst_file};
+    use std::fs;
 
     #[test]
     fn computes_local_trend_residuals() {
@@ -347,5 +349,18 @@ mod tests {
         .unwrap();
 
         assert_eq!(output, "time,signal,signal_anomaly_mask\n1.0,10.0,1\n");
+    }
+
+    #[test]
+    fn reads_tar_zst_csv_input() {
+        let path = temp_path("anomaly.tar.zst");
+        write_tar_zst_file(&path, "input.csv", "t,y\n0,0\n1,1\n2,20\n3,3\n4,4\n").unwrap();
+
+        let csv = read_csv(&path).unwrap();
+        let masks = detect_anomalies(&csv.headers, &csv.rows, "t", &[String::from("y")]).unwrap();
+
+        assert_eq!(masks[2][0], ANOMALY_POSITIVE_SPIKE);
+
+        let _ = fs::remove_file(path);
     }
 }

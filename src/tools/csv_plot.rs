@@ -487,6 +487,8 @@ fn format_number(value: f64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::tools::test_support::{temp_path, write_zst_file};
+    use std::fs;
 
     #[test]
     fn loads_plot_data() {
@@ -595,5 +597,18 @@ mod tests {
             compute_derivative_points(&[(0.0, 1.0), (0.5, 2.0), (1.0, 5.0)]),
             vec![(0.5, 2.0), (1.0, 6.0)]
         );
+    }
+
+    #[test]
+    fn reads_zst_csv_input() {
+        let path = temp_path("plot.csv.zst");
+        write_zst_file(&path, "t,x,v\n0.0,1.0,2.0\n1.0,3.0,4.0\n").unwrap();
+
+        let csv = read_csv(&path).unwrap();
+        let plot = load_plot_data(&csv.headers, &csv.rows, "t", &[String::from("x")]).unwrap();
+
+        assert_eq!(plot.series[0].points, vec![(0.0, 1.0), (1.0, 3.0)]);
+
+        let _ = fs::remove_file(path);
     }
 }

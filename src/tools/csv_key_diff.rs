@@ -1,6 +1,8 @@
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::error::Error;
 use std::fmt;
+use std::fs::File;
+use std::io::{Cursor, Read};
 use std::path::{Path, PathBuf};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -75,7 +77,7 @@ impl DiffReport {
 }
 
 pub fn read_csv(path: &Path) -> Result<CsvData, Box<dyn Error>> {
-    let mut reader = csv::Reader::from_path(path)?;
+    let mut reader = csv::Reader::from_reader(Cursor::new(read_csv_bytes(path)?));
     let headers = reader
         .headers()?
         .iter()
@@ -93,6 +95,68 @@ pub fn read_csv(path: &Path) -> Result<CsvData, Box<dyn Error>> {
         headers,
         rows,
     })
+}
+
+fn read_csv_bytes(path: &Path) -> Result<Vec<u8>, Box<dyn Error>> {
+    let file = File::open(path)?;
+    let file_name = path
+        .file_name()
+        .and_then(|value| value.to_str())
+        .map(|value| value.to_ascii_lowercase())
+        .unwrap_or_default();
+
+    if file_name.ends_with(".tar.zst") || file_name.ends_with(".tzst") {
+        return read_csv_from_tar(path, zstd::Decoder::new(file)?);
+    }
+    if file_name.ends_with(".tar") {
+        return read_csv_from_tar(path, file);
+    }
+    if file_name.ends_with(".zst") {
+        let mut decoder = zstd::Decoder::new(file)?;
+        let mut bytes = Vec::new();
+        decoder.read_to_end(&mut bytes)?;
+        return Ok(bytes);
+    }
+
+    let mut bytes = Vec::new();
+    let mut reader = file;
+    reader.read_to_end(&mut bytes)?;
+    Ok(bytes)
+}
+
+fn read_csv_from_tar(path: &Path, reader: impl Read) -> Result<Vec<u8>, Box<dyn Error>> {
+    let mut archive = tar::Archive::new(reader);
+    let mut csv_entry = None;
+
+    for entry in archive.entries()? {
+        let mut entry = entry?;
+        if !entry.header().entry_type().is_file() {
+            continue;
+        }
+
+        let entry_path = entry.path()?.into_owned();
+        if !entry_path
+            .to_string_lossy()
+            .to_ascii_lowercase()
+            .ends_with(".csv")
+        {
+            continue;
+        }
+
+        let mut bytes = Vec::new();
+        entry.read_to_end(&mut bytes)?;
+        if csv_entry.replace((entry_path, bytes)).is_some() {
+            return Err(format!(
+                "archive contains multiple csv files, expected exactly one: {}",
+                path.display()
+            )
+            .into());
+        }
+    }
+
+    csv_entry
+        .map(|(_, bytes)| bytes)
+        .ok_or_else(|| format!("archive does not contain a csv file: {}", path.display()).into())
 }
 
 pub fn diff_csv(left: &CsvData, right: &CsvData, key_columns: &[String]) -> DiffReport {
@@ -408,6 +472,8 @@ fn render_cell_value(value: Option<&str>) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::tools::test_support::{temp_path, write_tar_zst_file, write_zst_file};
+    use std::fs;
 
     fn csv(path: &str, headers: &[&str], rows: &[&[&str]]) -> CsvData {
         CsvData {
@@ -494,5 +560,63 @@ mod tests {
             report.row_changes[0].columns[0].right,
             Some(String::from("25"))
         );
+    }
+
+    #[test]
+    fn reads_zst_csv() {
+        let path = temp_path("sample.csv.zst");
+        write_zst_file(&path, "id,value\n1,10\n").unwrap();
+
+        let csv = read_csv(&path).unwrap();
+
+        assert_eq!(csv.headers, vec![String::from("id"), String::from("value")]);
+        assert_eq!(csv.rows, vec![vec![String::from("1"), String::from("10")]]);
+
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn reads_tar_zst_csv() {
+        let path = temp_path("sample.tar.zst");
+        write_tar_zst_file(&path, "nested/data.csv", "id,value\n1,10\n").unwrap();
+
+        let csv = read_csv(&path).unwrap();
+
+        assert_eq!(csv.headers, vec![String::from("id"), String::from("value")]);
+        assert_eq!(csv.rows, vec![vec![String::from("1"), String::from("10")]]);
+
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn rejects_tar_zst_with_multiple_csv_files() {
+        let path = temp_path("multiple.tar.zst");
+        {
+            use std::fs::File;
+
+            let file = File::create(&path).unwrap();
+            let encoder = zstd::Encoder::new(file, 0).unwrap();
+            let mut builder = tar::Builder::new(encoder);
+
+            for (name, contents) in [("a.csv", "id\n1\n"), ("b.csv", "id\n2\n")] {
+                let mut header = tar::Header::new_gnu();
+                header.set_entry_type(tar::EntryType::Regular);
+                header.set_mode(0o644);
+                header.set_size(contents.len() as u64);
+                header.set_cksum();
+                builder
+                    .append_data(&mut header, name, contents.as_bytes())
+                    .unwrap();
+            }
+
+            let encoder = builder.into_inner().unwrap();
+            encoder.finish().unwrap();
+        }
+
+        let error = read_csv(&path).unwrap_err();
+
+        assert!(error.to_string().contains("multiple csv files"));
+
+        let _ = fs::remove_file(path);
     }
 }

@@ -230,6 +230,8 @@ fn parse_quoted_value(input: &str, start: usize) -> Result<(String, usize), Box<
 mod tests {
     use super::*;
     use crate::tools::csv_key_diff::{diff_csv, render_diff};
+    use crate::tools::test_support::{temp_path, write_file, write_zst_file};
+    use std::fs;
     use std::path::PathBuf;
 
     fn csv(path: &str, headers: &[&str], rows: &[&[&str]]) -> CsvData {
@@ -303,5 +305,46 @@ mod tests {
             parse_key_columns_line("keys: id, sub_id"),
             Some(vec![String::from("id"), String::from("sub_id")])
         );
+    }
+
+    #[test]
+    fn extracts_rows_from_zst_csv_inputs() {
+        let left_path = temp_path("left.csv.zst");
+        let right_path = temp_path("right.csv.zst");
+        let diff_path = temp_path("diff.txt");
+        let output_left_path = temp_path("left_out.csv");
+        let output_right_path = temp_path("right_out.csv");
+
+        write_zst_file(&left_path, "id,value\n1,10\n2,20\n").unwrap();
+        write_zst_file(&right_path, "id,value\n1,15\n2,20\n").unwrap();
+        write_file(
+            &diff_path,
+            "--- left\n+++ right\nkeys: id\n@@ key [id=\"1\"] occurrence 1 modified @@\n- value=\"10\"\n+ value=\"15\"\n",
+        )
+        .unwrap();
+
+        extract_diff_rows_to_files(
+            &left_path,
+            &right_path,
+            &diff_path,
+            &output_left_path,
+            &output_right_path,
+        )
+        .unwrap();
+
+        assert_eq!(
+            fs::read_to_string(&output_left_path).unwrap(),
+            "id,value\n1,10\n"
+        );
+        assert_eq!(
+            fs::read_to_string(&output_right_path).unwrap(),
+            "id,value\n1,15\n"
+        );
+
+        let _ = fs::remove_file(left_path);
+        let _ = fs::remove_file(right_path);
+        let _ = fs::remove_file(diff_path);
+        let _ = fs::remove_file(output_left_path);
+        let _ = fs::remove_file(output_right_path);
     }
 }
