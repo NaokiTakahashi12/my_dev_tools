@@ -8,6 +8,9 @@ const NUMERICAL_NOISE_FLOOR: f64 = 1e-9;
 
 const ANOMALY_POSITIVE_SPIKE: u32 = 1;
 const ANOMALY_NEGATIVE_SPIKE: u32 = 2;
+const ANOMALY_POSITIVE_STEP: u32 = 4;
+const ANOMALY_NEGATIVE_STEP: u32 = 8;
+const STEP_SCORE_THRESHOLD: f64 = 3.0;
 
 pub fn run(input_path: &Path, x_column: &str, y_columns: &[String]) -> Result<(), Box<dyn Error>> {
     let csv = read_csv(input_path)?;
@@ -47,17 +50,13 @@ fn detect_anomalies(
         let scores = local_scores(&residuals);
 
         for row_index in 0..rows.len() {
-            let Some(residual) = residuals[row_index] else {
-                continue;
+            let step_mask = detect_step_mask(&y_values, row_index);
+            let spike_mask = if step_mask == 0 {
+                detect_spike_mask(&residuals, &scores, row_index)
+            } else {
+                0
             };
-            let Some(score) = scores[row_index] else {
-                continue;
-            };
-            if score < LOCAL_SCORE_THRESHOLD || !is_local_peak(&residuals, row_index) {
-                continue;
-            }
-
-            masks[row_index][column_offset] = anomaly_mask(residual);
+            masks[row_index][column_offset] = spike_mask | step_mask;
         }
     }
 
@@ -88,6 +87,64 @@ fn anomaly_mask(residual: f64) -> u32 {
         ANOMALY_NEGATIVE_SPIKE
     } else {
         0
+    }
+}
+
+fn detect_spike_mask(residuals: &[Option<f64>], scores: &[Option<f64>], index: usize) -> u32 {
+    let Some(residual) = residuals[index] else {
+        return 0;
+    };
+    let Some(score) = scores[index] else {
+        return 0;
+    };
+    if score < LOCAL_SCORE_THRESHOLD || !is_local_peak(residuals, index) {
+        return 0;
+    }
+    anomaly_mask(residual)
+}
+
+fn detect_step_mask(y_values: &[f64], index: usize) -> u32 {
+    if index < 2 || index + 2 >= y_values.len() {
+        return 0;
+    }
+
+    let before_level = median(vec![y_values[index - 2], y_values[index - 1]]);
+    let after_level = median(vec![y_values[index + 1], y_values[index + 2]]);
+    let step_size = after_level - before_level;
+    let scale = before_level
+        .abs()
+        .max(after_level.abs())
+        .max(y_values[index].abs())
+        .max(1.0);
+    let noise_floor = scale * NUMERICAL_NOISE_FLOOR;
+
+    if step_size.abs() <= noise_floor {
+        return 0;
+    }
+
+    let stable_before = (y_values[index - 1] - y_values[index - 2]).abs();
+    let stable_after = (y_values[index + 2] - y_values[index + 1]).abs();
+    let baseline = median(vec![stable_before, stable_after]);
+    let score = if baseline <= noise_floor {
+        f64::INFINITY
+    } else {
+        step_size.abs() / baseline
+    };
+    let current_alignment = (y_values[index] - after_level).abs();
+    let transition = (y_values[index] - y_values[index - 1]).abs();
+    let alignment_limit = (step_size.abs() * 0.25).max(noise_floor * 4.0);
+
+    if score < STEP_SCORE_THRESHOLD
+        || current_alignment > alignment_limit
+        || transition < step_size.abs() * 0.5
+    {
+        return 0;
+    }
+
+    if step_size > 0.0 {
+        ANOMALY_POSITIVE_STEP
+    } else {
+        ANOMALY_NEGATIVE_STEP
     }
 }
 
@@ -288,6 +345,50 @@ mod tests {
         assert_eq!(masks[2][1], ANOMALY_NEGATIVE_SPIKE);
         assert_eq!(masks[1][0], 0);
         assert_eq!(masks[3][1], 0);
+    }
+
+    #[test]
+    fn labels_positive_and_negative_steps() {
+        let headers = vec![
+            String::from("t"),
+            String::from("y_up"),
+            String::from("y_down"),
+        ];
+        let rows = vec![
+            vec![String::from("0"), String::from("0"), String::from("10")],
+            vec![String::from("1"), String::from("0"), String::from("10")],
+            vec![String::from("2"), String::from("10"), String::from("0")],
+            vec![String::from("3"), String::from("10"), String::from("0")],
+            vec![String::from("4"), String::from("10"), String::from("0")],
+        ];
+
+        let masks = detect_anomalies(
+            &headers,
+            &rows,
+            "t",
+            &[String::from("y_up"), String::from("y_down")],
+        )
+        .unwrap();
+
+        assert_eq!(masks[2][0], ANOMALY_POSITIVE_STEP);
+        assert_eq!(masks[2][1], ANOMALY_NEGATIVE_STEP);
+    }
+
+    #[test]
+    fn does_not_mislabel_spike_as_step() {
+        let headers = vec![String::from("t"), String::from("y")];
+        let rows = vec![
+            vec![String::from("0"), String::from("0")],
+            vec![String::from("1"), String::from("0")],
+            vec![String::from("2"), String::from("10")],
+            vec![String::from("3"), String::from("0")],
+            vec![String::from("4"), String::from("0")],
+            vec![String::from("5"), String::from("0")],
+        ];
+
+        let masks = detect_anomalies(&headers, &rows, "t", &[String::from("y")]).unwrap();
+
+        assert_eq!(masks[2][0], ANOMALY_POSITIVE_SPIKE);
     }
 
     #[test]

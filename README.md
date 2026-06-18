@@ -56,6 +56,8 @@ cargo run -- csv_pseudo_diff input.csv \
 
 - `1`: 正方向スパイク
 - `2`: 負方向スパイク
+- `4`: 正方向ステップ変化
+- `8`: 負方向ステップ変化
 
 ```bash
 cargo run -- csv_anomaly_detect input.csv \
