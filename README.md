@@ -67,15 +67,24 @@ cargo run -- csv_anomaly_detect input.csv \
 
 ## csv_plot
 
-指定した `x` 列と `y` 列をターミナル上でプロットします。`ratatui` を使うため、このコマンドだけは `plot` feature を有効にしてビルドする必要があります。
+指定した列をターミナル上でプロットします。プロット機能は常にビルド対象です。
 
 ```bash
-cargo run --features plot -- csv_plot input.csv \
+cargo run -- csv_plot input.csv \
   --x-column stamp \
   --y-columns signal,velocity
+
+cargo run -- csv_plot input.csv \
+  --label-column label \
+  --timestamp-column stamp \
+  --value-column signal
 ```
 
-プロット画面は `q`、`Esc`、`Enter` で終了します。`plot` feature なしでビルドしたバイナリでは、このコマンドは「plot support なし」と表示して実行されません。
+`--x-column` / `--y-columns` を指定した場合は従来通り数値列をそのままプロットします。
+
+`--label-column` / `--timestamp-column` / `--value-column` を指定した場合は、ラベルごとに系列を自動で分割して時系列プロットします。タイムスタンプ列は Unix 秒、RFC3339、または UTC とみなせる `YYYY-MM-DD HH:MM:SS[.fraction]` / `YYYY/MM/DD HH:MM:SS[.fraction]` / `...T...` 形式を受け付けます。
+
+プロット画面は `q`、`Esc`、`Enter` で終了します。
 
 操作:
 

@@ -3,7 +3,6 @@ use std::error::Error;
 use std::ffi::OsString;
 use std::path::PathBuf;
 
-#[cfg(feature = "plot")]
 use crate::tools::csv_plot;
 use crate::tools::{csv_anomaly_detect, csv_key_diff, csv_key_diff_extract, csv_pseudo_diff};
 
@@ -33,11 +32,22 @@ enum Command {
         x_column: String,
         y_columns: Vec<String>,
     },
-    #[cfg(feature = "plot")]
     CsvPlot {
         input: PathBuf,
+        mode: CsvPlotCommand,
+    },
+}
+
+#[derive(Debug, PartialEq)]
+enum CsvPlotCommand {
+    XY {
         x_column: String,
         y_columns: Vec<String>,
+    },
+    LabeledSeries {
+        label_column: String,
+        timestamp_column: String,
+        value_column: String,
     },
 }
 
@@ -95,12 +105,7 @@ fn run_from_args(args: Vec<OsString>) -> Result<i32, Box<dyn Error>> {
             csv_anomaly_detect::run(&input, &x_column, &y_columns)?;
             Ok(0)
         }
-        #[cfg(feature = "plot")]
-        Command::CsvPlot {
-            input,
-            x_column,
-            y_columns,
-        } => run_csv_plot(&input, &x_column, &y_columns),
+        Command::CsvPlot { input, mode } => run_csv_plot(&input, &mode),
     }
 }
 
@@ -114,7 +119,6 @@ fn parse_args(args: Vec<OsString>) -> Result<Command, Box<dyn Error>> {
         "csv_key_diff_extract" => parse_csv_key_diff_extract(&args[1..]),
         "csv_pseudo_diff" => parse_csv_pseudo_diff(&args[1..]),
         "csv_anomaly_detect" => parse_csv_anomaly_detect(&args[1..]),
-        #[cfg(feature = "plot")]
         "csv_plot" => parse_csv_plot(&args[1..]),
         _ => Err(format!("unknown command: {command}\n\n{}", usage()).into()),
     }
@@ -345,11 +349,10 @@ fn extend_unique_names(target: &mut Vec<String>, value: &str) {
     }
 }
 
-#[cfg(feature = "plot")]
 fn parse_csv_plot(args: &[OsString]) -> Result<Command, Box<dyn Error>> {
     if args.is_empty() {
         return Err(String::from(
-            "csv_plot requires INPUT --x-column NAME --y-columns NAME[,NAME...]",
+            "csv_plot requires INPUT with either --x-column/--y-columns or --label-column/--timestamp-column/--value-column",
         )
         .into());
     }
@@ -357,6 +360,9 @@ fn parse_csv_plot(args: &[OsString]) -> Result<Command, Box<dyn Error>> {
     let input = PathBuf::from(&args[0]);
     let mut x_column = None;
     let mut y_columns = Vec::new();
+    let mut label_column = None;
+    let mut timestamp_column = None;
+    let mut value_column = None;
     let mut index = 1;
 
     while index < args.len() {
@@ -375,57 +381,100 @@ fn parse_csv_plot(args: &[OsString]) -> Result<Command, Box<dyn Error>> {
                 extend_unique_names(&mut y_columns, value);
                 index += 2;
             }
+            Some("--label-column") => {
+                let Some(value) = args.get(index + 1).and_then(|arg| arg.to_str()) else {
+                    return Err(String::from("missing value after --label-column").into());
+                };
+                label_column = Some(value.to_string());
+                index += 2;
+            }
+            Some("--timestamp-column") => {
+                let Some(value) = args.get(index + 1).and_then(|arg| arg.to_str()) else {
+                    return Err(String::from("missing value after --timestamp-column").into());
+                };
+                timestamp_column = Some(value.to_string());
+                index += 2;
+            }
+            Some("--value-column") => {
+                let Some(value) = args.get(index + 1).and_then(|arg| arg.to_str()) else {
+                    return Err(String::from("missing value after --value-column").into());
+                };
+                value_column = Some(value.to_string());
+                index += 2;
+            }
             Some(other) => return Err(format!("unexpected argument for csv_plot: {other}").into()),
             None => return Err(String::from("arguments must be valid UTF-8").into()),
         }
     }
 
-    let Some(x_column) = x_column else {
-        return Err(String::from("csv_plot requires --x-column NAME").into());
+    let mode = if let Some(x_column) = x_column {
+        if !y_columns.is_empty()
+            && label_column.is_none()
+            && timestamp_column.is_none()
+            && value_column.is_none()
+        {
+            CsvPlotCommand::XY {
+                x_column,
+                y_columns,
+            }
+        } else {
+            return Err(String::from(
+                "csv_plot XY mode requires only --x-column NAME --y-columns NAME[,NAME...]",
+            )
+            .into());
+        }
+    } else if y_columns.is_empty() {
+        match (label_column, timestamp_column, value_column) {
+            (Some(label_column), Some(timestamp_column), Some(value_column)) => {
+                CsvPlotCommand::LabeledSeries {
+                    label_column,
+                    timestamp_column,
+                    value_column,
+                }
+            }
+            _ => {
+                return Err(String::from(
+                    "csv_plot labeled mode requires --label-column NAME --timestamp-column NAME --value-column NAME",
+                )
+                .into())
+            }
+        }
+    } else {
+        return Err(String::from("csv_plot requires --x-column together with --y-columns").into());
     };
-    if y_columns.is_empty() {
-        return Err(String::from("csv_plot requires --y-columns NAME[,NAME...]").into());
-    }
 
-    Ok(Command::CsvPlot {
-        input,
-        x_column,
-        y_columns,
-    })
+    Ok(Command::CsvPlot { input, mode })
 }
 
-#[cfg(feature = "plot")]
-fn run_csv_plot(
-    input: &PathBuf,
-    x_column: &str,
-    y_columns: &[String],
-) -> Result<i32, Box<dyn Error>> {
-    csv_plot::run(input, x_column, y_columns)?;
+fn run_csv_plot(input: &PathBuf, mode: &CsvPlotCommand) -> Result<i32, Box<dyn Error>> {
+    match mode {
+        CsvPlotCommand::XY {
+            x_column,
+            y_columns,
+        } => {
+            csv_plot::run_xy(input, x_column, y_columns)?;
+        }
+        CsvPlotCommand::LabeledSeries {
+            label_column,
+            timestamp_column,
+            value_column,
+        } => {
+            csv_plot::run_labeled_series(input, label_column, timestamp_column, value_column)?;
+        }
+    }
     Ok(0)
 }
 
 fn usage() -> &'static str {
-    #[cfg(feature = "plot")]
-    {
-        concat!(
-            "usage:\n",
-            "  my_dev_tools csv_anomaly_detect INPUT --x-column NAME --y-columns NAME[,NAME...]\n",
-            "  my_dev_tools csv_key_diff LEFT RIGHT --key KEY [--key KEY ...]\n",
-            "  my_dev_tools csv_key_diff_extract LEFT RIGHT DIFF --output_left PATH --output_right PATH\n",
-            "  my_dev_tools csv_pseudo_diff INPUT --time-column NAME --value-column NAME --time-scale VALUE [--output PATH]\n",
-            "  my_dev_tools csv_plot INPUT --x-column NAME --y-columns NAME[,NAME...]\n"
-        )
-    }
-    #[cfg(not(feature = "plot"))]
-    {
-        concat!(
-            "usage:\n",
-            "  my_dev_tools csv_anomaly_detect INPUT --x-column NAME --y-columns NAME[,NAME...]\n",
-            "  my_dev_tools csv_key_diff LEFT RIGHT --key KEY [--key KEY ...]\n",
-            "  my_dev_tools csv_key_diff_extract LEFT RIGHT DIFF --output_left PATH --output_right PATH\n",
-            "  my_dev_tools csv_pseudo_diff INPUT --time-column NAME --value-column NAME --time-scale VALUE [--output PATH]\n"
-        )
-    }
+    concat!(
+        "usage:\n",
+        "  my_dev_tools csv_anomaly_detect INPUT --x-column NAME --y-columns NAME[,NAME...]\n",
+        "  my_dev_tools csv_key_diff LEFT RIGHT --key KEY [--key KEY ...]\n",
+        "  my_dev_tools csv_key_diff_extract LEFT RIGHT DIFF --output_left PATH --output_right PATH\n",
+        "  my_dev_tools csv_pseudo_diff INPUT --time-column NAME --value-column NAME --time-scale VALUE [--output PATH]\n",
+        "  my_dev_tools csv_plot INPUT --x-column NAME --y-columns NAME[,NAME...]\n",
+        "  my_dev_tools csv_plot INPUT --label-column NAME --timestamp-column NAME --value-column NAME\n"
+    )
 }
 
 #[cfg(test)]
@@ -535,7 +584,6 @@ mod tests {
         );
     }
 
-    #[cfg(feature = "plot")]
     #[test]
     fn parses_csv_plot_command() {
         let command = parse_args(os_args(&[
@@ -552,13 +600,14 @@ mod tests {
             command,
             Command::CsvPlot {
                 input: PathBuf::from("input.csv"),
-                x_column: String::from("stamp"),
-                y_columns: vec![String::from("signal"), String::from("velocity")],
+                mode: CsvPlotCommand::XY {
+                    x_column: String::from("stamp"),
+                    y_columns: vec![String::from("signal"), String::from("velocity")],
+                },
             }
         );
     }
 
-    #[cfg(feature = "plot")]
     #[test]
     fn parses_csv_plot_command_with_repeated_y_columns() {
         let command = parse_args(os_args(&[
@@ -577,8 +626,37 @@ mod tests {
             command,
             Command::CsvPlot {
                 input: PathBuf::from("input.csv"),
-                x_column: String::from("stamp"),
-                y_columns: vec![String::from("signal"), String::from("velocity")],
+                mode: CsvPlotCommand::XY {
+                    x_column: String::from("stamp"),
+                    y_columns: vec![String::from("signal"), String::from("velocity")],
+                },
+            }
+        );
+    }
+
+    #[test]
+    fn parses_csv_plot_labeled_series_command() {
+        let command = parse_args(os_args(&[
+            "csv_plot",
+            "input.csv",
+            "--label-column",
+            "label",
+            "--timestamp-column",
+            "stamp",
+            "--value-column",
+            "signal",
+        ]))
+        .unwrap();
+
+        assert_eq!(
+            command,
+            Command::CsvPlot {
+                input: PathBuf::from("input.csv"),
+                mode: CsvPlotCommand::LabeledSeries {
+                    label_column: String::from("label"),
+                    timestamp_column: String::from("stamp"),
+                    value_column: String::from("signal"),
+                },
             }
         );
     }

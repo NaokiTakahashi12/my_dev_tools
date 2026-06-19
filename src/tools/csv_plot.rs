@@ -1,7 +1,9 @@
+use std::collections::BTreeMap;
 use std::error::Error;
 use std::io::stdout;
 use std::path::Path;
 
+use chrono::{DateTime, NaiveDateTime, TimeZone, Utc};
 use crossterm::event::{self, Event, KeyCode, KeyEventKind};
 use crossterm::execute;
 use crossterm::terminal::{
@@ -15,7 +17,7 @@ use ratatui::text::Line;
 use ratatui::widgets::{Axis, Block, Borders, Chart, Dataset, GraphType, Paragraph};
 use ratatui::{Frame, Terminal};
 
-use super::csv_key_diff::read_csv;
+use super::csv_key_diff::{CsvData, read_csv};
 
 const HORIZONTAL_MARGIN: u16 = 12;
 const SERIES_COLORS: [Color; 6] = [
@@ -29,7 +31,8 @@ const SERIES_COLORS: [Color; 6] = [
 
 #[derive(Debug, Clone, PartialEq)]
 struct PlotData {
-    x_column: String,
+    x_axis: AxisDescriptor,
+    y_axis_label: String,
     series: Vec<PlotSeries>,
     derivative_series: Vec<PlotSeries>,
     x_bounds: [f64; 2],
@@ -38,8 +41,20 @@ struct PlotData {
 }
 
 #[derive(Debug, Clone, PartialEq)]
+struct AxisDescriptor {
+    label: String,
+    kind: AxisKind,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+enum AxisKind {
+    Numeric,
+    Timestamp,
+}
+
+#[derive(Debug, Clone, PartialEq)]
 struct PlotSeries {
-    y_column: String,
+    name: String,
     points: Vec<(f64, f64)>,
 }
 
@@ -56,51 +71,147 @@ struct PlotState {
     show_derivative: bool,
 }
 
-pub fn run(input_path: &Path, x_column: &str, y_columns: &[String]) -> Result<(), Box<dyn Error>> {
+pub fn run_xy(
+    input_path: &Path,
+    x_column: &str,
+    y_columns: &[String],
+) -> Result<(), Box<dyn Error>> {
     let csv = read_csv(input_path)?;
-    let plot = load_plot_data(&csv.headers, &csv.rows, x_column, y_columns)?;
+    let plot = load_xy_plot_data(&csv, x_column, y_columns)?;
+    run_plot(plot)
+}
+
+pub fn run_labeled_series(
+    input_path: &Path,
+    label_column: &str,
+    timestamp_column: &str,
+    value_column: &str,
+) -> Result<(), Box<dyn Error>> {
+    let csv = read_csv(input_path)?;
+    let plot = load_labeled_series_plot_data(&csv, label_column, timestamp_column, value_column)?;
+    run_plot(plot)
+}
+
+fn run_plot(plot: PlotData) -> Result<(), Box<dyn Error>> {
     let mut terminal = setup_terminal()?;
     let result = draw_plot(&mut terminal, &plot);
     restore_terminal(&mut terminal)?;
     result
 }
 
-fn load_plot_data(
-    headers: &[String],
-    rows: &[Vec<String>],
+fn load_xy_plot_data(
+    csv: &CsvData,
     x_column: &str,
     y_columns: &[String],
 ) -> Result<PlotData, Box<dyn Error>> {
-    let x_index = find_column_index(headers, x_column)?;
+    let x_index = find_column_index(&csv.headers, x_column)?;
     if y_columns.is_empty() {
         return Err(String::from("csv_plot requires at least one y column").into());
     }
 
     let y_indices = y_columns
         .iter()
-        .map(|name| find_column_index(headers, name).map(|index| (name.clone(), index)))
+        .map(|name| find_column_index(&csv.headers, name).map(|index| (name.clone(), index)))
         .collect::<Result<Vec<_>, _>>()?;
     let mut series = y_indices
         .iter()
         .map(|(name, _)| PlotSeries {
-            y_column: name.clone(),
-            points: Vec::with_capacity(rows.len()),
+            name: name.clone(),
+            points: Vec::with_capacity(csv.rows.len()),
         })
         .collect::<Vec<_>>();
 
-    let mut y_values = Vec::with_capacity(rows.len() * y_indices.len());
-    let mut x_values = Vec::with_capacity(rows.len());
+    let mut y_values = Vec::with_capacity(csv.rows.len() * y_indices.len());
+    let mut x_values = Vec::with_capacity(csv.rows.len());
 
-    for (row_index, row) in rows.iter().enumerate() {
-        let x = parse_cell(row, x_index, x_column, row_index)?;
+    for (row_index, row) in csv.rows.iter().enumerate() {
+        let x = parse_f64_cell(row, x_index, x_column, row_index)?;
         x_values.push(x);
         for (series_index, (name, y_index)) in y_indices.iter().enumerate() {
-            let y = parse_cell(row, *y_index, name, row_index)?;
+            let y = parse_f64_cell(row, *y_index, name, row_index)?;
             series[series_index].points.push((x, y));
             y_values.push(y);
         }
     }
 
+    build_plot_data(
+        AxisDescriptor {
+            label: x_column.to_string(),
+            kind: AxisKind::Numeric,
+        },
+        "y".to_string(),
+        series,
+        x_values,
+        y_values,
+    )
+}
+
+fn load_labeled_series_plot_data(
+    csv: &CsvData,
+    label_column: &str,
+    timestamp_column: &str,
+    value_column: &str,
+) -> Result<PlotData, Box<dyn Error>> {
+    let label_index = find_column_index(&csv.headers, label_column)?;
+    let timestamp_index = find_column_index(&csv.headers, timestamp_column)?;
+    let value_index = find_column_index(&csv.headers, value_column)?;
+
+    let mut grouped = BTreeMap::<String, Vec<(f64, f64)>>::new();
+    let mut x_values = Vec::with_capacity(csv.rows.len());
+    let mut y_values = Vec::with_capacity(csv.rows.len());
+
+    for (row_index, row) in csv.rows.iter().enumerate() {
+        let label = row
+            .get(label_index)
+            .ok_or_else(|| format!("row is missing column value: {label_column}"))?
+            .trim();
+        if label.is_empty() {
+            return Err(format!(
+                "row {} column {label_column} must not be empty",
+                row_index + 1
+            )
+            .into());
+        }
+
+        let x = parse_timestamp_cell(row, timestamp_index, timestamp_column, row_index)?;
+        let y = parse_f64_cell(row, value_index, value_column, row_index)?;
+        grouped.entry(label.to_string()).or_default().push((x, y));
+        x_values.push(x);
+        y_values.push(y);
+    }
+
+    if grouped.is_empty() {
+        return Err(String::from("csv_plot requires at least one row").into());
+    }
+
+    let mut series = grouped
+        .into_iter()
+        .map(|(name, mut points)| {
+            points.sort_by(|left, right| left.0.total_cmp(&right.0));
+            PlotSeries { name, points }
+        })
+        .collect::<Vec<_>>();
+    series.sort_by(|left, right| left.name.cmp(&right.name));
+
+    build_plot_data(
+        AxisDescriptor {
+            label: timestamp_column.to_string(),
+            kind: AxisKind::Timestamp,
+        },
+        value_column.to_string(),
+        series,
+        x_values,
+        y_values,
+    )
+}
+
+fn build_plot_data(
+    x_axis: AxisDescriptor,
+    y_axis_label: String,
+    mut series: Vec<PlotSeries>,
+    x_values: Vec<f64>,
+    y_values: Vec<f64>,
+) -> Result<PlotData, Box<dyn Error>> {
     if x_values.is_empty() {
         return Err(String::from("csv_plot requires at least one row").into());
     }
@@ -109,10 +220,11 @@ fn load_plot_data(
         item.points
             .sort_by(|left, right| left.0.total_cmp(&right.0));
     }
+
     let derivative_series = series
         .iter()
         .map(|series| PlotSeries {
-            y_column: format!("d({})/d{}", series.y_column, x_column),
+            name: format!("d({})/d{}", series.name, x_axis.label),
             points: compute_derivative_points(&series.points),
         })
         .collect::<Vec<_>>();
@@ -122,7 +234,8 @@ fn load_plot_data(
         .collect::<Vec<_>>();
 
     Ok(PlotData {
-        x_column: x_column.to_string(),
+        x_axis,
+        y_axis_label,
         series,
         derivative_series,
         x_bounds: axis_bounds(x_values.into_iter()),
@@ -186,8 +299,8 @@ fn draw_plot(
                 frame,
                 main_area,
                 &plot.series,
-                &plot.x_column,
-                "y",
+                &plot.x_axis,
+                &plot.y_axis_label,
                 state.main_viewport.x_bounds,
                 state.main_viewport.y_bounds,
             );
@@ -196,7 +309,7 @@ fn draw_plot(
                     frame,
                     derivative_area,
                     &plot.derivative_series,
-                    &plot.x_column,
+                    &plot.x_axis,
                     "dy/dx",
                     state.main_viewport.x_bounds,
                     state.derivative_y_bounds,
@@ -293,13 +406,13 @@ fn render_chart(
     frame: &mut Frame,
     area: ratatui::layout::Rect,
     series: &[PlotSeries],
-    x_column: &str,
+    x_axis: &AxisDescriptor,
     y_label: &str,
     x_bounds: [f64; 2],
     y_bounds: [f64; 2],
 ) {
-    let x_labels = axis_labels(x_bounds);
-    let y_labels = axis_labels(y_bounds);
+    let x_labels = axis_labels(x_bounds, &x_axis.kind);
+    let y_labels = axis_labels(y_bounds, &AxisKind::Numeric);
     let sampled_series = series
         .iter()
         .map(|series| visible_points(&series.points, x_bounds, area.width))
@@ -310,7 +423,7 @@ fn render_chart(
         .enumerate()
         .map(|(index, (series, sampled_points))| {
             Dataset::default()
-                .name(series.y_column.as_str())
+                .name(series.name.as_str())
                 .marker(Marker::Braille)
                 .graph_type(GraphType::Line)
                 .style(Style::default().fg(SERIES_COLORS[index % SERIES_COLORS.len()]))
@@ -325,16 +438,16 @@ fn render_chart(
                     "{} vs {}",
                     series
                         .iter()
-                        .map(|series| series.y_column.as_str())
+                        .map(|series| series.name.as_str())
                         .collect::<Vec<_>>()
                         .join(", "),
-                    x_column
+                    x_axis.label
                 ))
                 .borders(Borders::ALL),
         )
         .x_axis(
             Axis::default()
-                .title(Line::from(x_column.to_string()))
+                .title(Line::from(x_axis.label.clone()))
                 .bounds(x_bounds)
                 .labels(x_labels),
         )
@@ -348,12 +461,31 @@ fn render_chart(
     frame.render_widget(chart, area);
 }
 
-fn axis_labels(bounds: [f64; 2]) -> Vec<Line<'static>> {
+fn axis_labels(bounds: [f64; 2], axis_kind: &AxisKind) -> Vec<Line<'static>> {
+    let midpoint = (bounds[0] + bounds[1]) / 2.0;
     vec![
-        Line::from(format_number(bounds[0])),
-        Line::from(format_number((bounds[0] + bounds[1]) / 2.0)),
-        Line::from(format_number(bounds[1])),
+        Line::from(format_axis_value(bounds[0], axis_kind)),
+        Line::from(format_axis_value(midpoint, axis_kind)),
+        Line::from(format_axis_value(bounds[1], axis_kind)),
     ]
+}
+
+fn format_axis_value(value: f64, axis_kind: &AxisKind) -> String {
+    match axis_kind {
+        AxisKind::Numeric => format_number(value),
+        AxisKind::Timestamp => {
+            format_timestamp_label(value).unwrap_or_else(|| format_number(value))
+        }
+    }
+}
+
+fn format_timestamp_label(value: f64) -> Option<String> {
+    if !value.is_finite() {
+        return None;
+    }
+    let (seconds, nanos) = split_unix_timestamp(value)?;
+    let timestamp = DateTime::<Utc>::from_timestamp(seconds, nanos)?;
+    Some(timestamp.format("%m-%d %H:%M:%S").to_string())
 }
 
 fn axis_bounds(values: impl Iterator<Item = f64>) -> [f64; 2] {
@@ -448,7 +580,7 @@ fn clamp_bounds(bounds: &mut [f64; 2], full_bounds: [f64; 2]) {
     }
 }
 
-fn parse_cell(
+fn parse_f64_cell(
     row: &[String],
     index: usize,
     column_name: &str,
@@ -473,6 +605,76 @@ fn parse_cell(
     Ok(parsed)
 }
 
+fn parse_timestamp_cell(
+    row: &[String],
+    index: usize,
+    column_name: &str,
+    row_index: usize,
+) -> Result<f64, Box<dyn Error>> {
+    let value = row
+        .get(index)
+        .ok_or_else(|| format!("row is missing column value: {column_name}"))?;
+    parse_timestamp_value(value).ok_or_else(|| {
+        format!(
+            "failed to parse row {} column {column_name} as timestamp: {value}",
+            row_index + 1
+        )
+        .into()
+    })
+}
+
+fn parse_timestamp_value(value: &str) -> Option<f64> {
+    let value = value.trim();
+    if let Ok(unix_seconds) = value.parse::<f64>() {
+        return unix_seconds.is_finite().then_some(unix_seconds);
+    }
+
+    DateTime::parse_from_rfc3339(value)
+        .ok()
+        .map(|timestamp| timestamp.timestamp_nanos_opt().map(nanos_to_seconds))
+        .flatten()
+        .or_else(|| parse_naive_timestamp(value))
+}
+
+fn split_unix_timestamp(value: f64) -> Option<(i64, u32)> {
+    if !value.is_finite() {
+        return None;
+    }
+
+    let mut seconds = value.floor() as i64;
+    let mut nanos = ((value - seconds as f64) * 1_000_000_000.0).round() as i64;
+    if nanos >= 1_000_000_000 {
+        seconds += 1;
+        nanos -= 1_000_000_000;
+    } else if nanos < 0 {
+        seconds -= 1;
+        nanos += 1_000_000_000;
+    }
+
+    (0..1_000_000_000)
+        .contains(&nanos)
+        .then_some((seconds, nanos as u32))
+}
+
+fn parse_naive_timestamp(value: &str) -> Option<f64> {
+    const FORMATS: [&str; 4] = [
+        "%Y-%m-%d %H:%M:%S%.f",
+        "%Y/%m/%d %H:%M:%S%.f",
+        "%Y-%m-%dT%H:%M:%S%.f",
+        "%Y/%m/%dT%H:%M:%S%.f",
+    ];
+
+    FORMATS.iter().find_map(|format| {
+        let naive = NaiveDateTime::parse_from_str(value, format).ok()?;
+        let timestamp = Utc.from_utc_datetime(&naive);
+        timestamp.timestamp_nanos_opt().map(nanos_to_seconds)
+    })
+}
+
+fn nanos_to_seconds(nanos: i64) -> f64 {
+    nanos as f64 / 1_000_000_000.0
+}
+
 fn find_column_index(headers: &[String], name: &str) -> Result<usize, Box<dyn Error>> {
     headers
         .iter()
@@ -487,128 +689,110 @@ fn format_number(value: f64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::tools::test_support::{temp_path, write_zst_file};
+    use crate::tools::test_support::{temp_path, write_file, write_zst_file};
     use std::fs;
 
     #[test]
-    fn loads_plot_data() {
-        let headers = vec![String::from("t"), String::from("x"), String::from("v")];
-        let rows = vec![
-            vec![
-                String::from("0.0"),
-                String::from("1.0"),
-                String::from("2.0"),
+    fn loads_xy_plot_data() {
+        let csv = CsvData {
+            path: Path::new("input.csv").to_path_buf(),
+            headers: vec![String::from("t"), String::from("x"), String::from("v")],
+            rows: vec![
+                vec![
+                    String::from("0.0"),
+                    String::from("1.0"),
+                    String::from("2.0"),
+                ],
+                vec![
+                    String::from("1.0"),
+                    String::from("3.0"),
+                    String::from("4.0"),
+                ],
             ],
-            vec![
-                String::from("1.0"),
-                String::from("3.0"),
-                String::from("4.0"),
-            ],
-        ];
+        };
 
-        let plot = load_plot_data(
-            &headers,
-            &rows,
-            "t",
-            &[String::from("x"), String::from("v")],
-        )
-        .unwrap();
+        let plot = load_xy_plot_data(&csv, "t", &[String::from("x"), String::from("v")]).unwrap();
 
         assert_eq!(plot.series[0].points, vec![(0.0, 1.0), (1.0, 3.0)]);
         assert_eq!(plot.series[1].points, vec![(0.0, 2.0), (1.0, 4.0)]);
         assert_eq!(plot.derivative_series[0].points, vec![(1.0, 2.0)]);
         assert_eq!(plot.derivative_series[1].points, vec![(1.0, 2.0)]);
-        assert_eq!(plot.x_bounds, [0.0, 1.0]);
-        assert_eq!(plot.y_bounds, [1.0, 4.0]);
-        assert_eq!(plot.derivative_y_bounds, [1.0, 3.0]);
     }
 
     #[test]
-    fn expands_flat_axis_bounds() {
-        assert_eq!(axis_bounds([2.0].into_iter()), [1.0, 3.0]);
-    }
-
-    #[test]
-    fn rejects_non_finite_plot_value() {
-        let headers = vec![String::from("t"), String::from("x")];
-        let rows = vec![vec![String::from("0.0"), String::from("NaN")]];
-
-        assert!(load_plot_data(&headers, &rows, "t", &[String::from("x")]).is_err());
-    }
-
-    #[test]
-    fn zooms_bounds_around_center() {
-        let mut bounds = [0.0, 10.0];
-        zoom_bounds(&mut bounds, [0.0, 10.0], 0.5);
-        assert_eq!(bounds, [2.5, 7.5]);
-    }
-
-    #[test]
-    fn pans_bounds_within_full_range() {
-        let mut bounds = [2.0, 6.0];
-        pan_bounds(&mut bounds, [0.0, 10.0], 1.0);
-        assert_eq!(bounds, [6.0, 10.0]);
-    }
-
-    #[test]
-    fn samples_only_visible_points() {
-        let plot = PlotData {
-            x_column: String::from("x"),
-            series: vec![PlotSeries {
-                y_column: String::from("y"),
-                points: vec![(0.0, 0.0), (1.0, 1.0), (2.0, 4.0), (3.0, 9.0)],
-            }],
-            derivative_series: Vec::new(),
-            x_bounds: [0.0, 3.0],
-            y_bounds: [0.0, 9.0],
-            derivative_y_bounds: [-1.0, 1.0],
+    fn loads_labeled_series_plot_data() {
+        let csv = CsvData {
+            path: Path::new("input.csv").to_path_buf(),
+            headers: vec![
+                String::from("label"),
+                String::from("stamp"),
+                String::from("signal"),
+            ],
+            rows: vec![
+                vec![
+                    String::from("beta"),
+                    String::from("2026-01-01T00:00:02Z"),
+                    String::from("5.0"),
+                ],
+                vec![
+                    String::from("alpha"),
+                    String::from("2026-01-01T00:00:01Z"),
+                    String::from("1.5"),
+                ],
+                vec![
+                    String::from("alpha"),
+                    String::from("2026-01-01T00:00:03Z"),
+                    String::from("2.5"),
+                ],
+            ],
         };
 
-        assert_eq!(
-            visible_points(&plot.series[0].points, [1.0, 2.0], 80),
-            vec![(1.0, 1.0), (2.0, 4.0)]
-        );
+        let plot = load_labeled_series_plot_data(&csv, "label", "stamp", "signal").unwrap();
+
+        assert_eq!(plot.x_axis.kind, AxisKind::Timestamp);
+        assert_eq!(plot.series.len(), 2);
+        assert_eq!(plot.series[0].name, "alpha");
+        assert_eq!(plot.series[0].points[0].1, 1.5);
+        assert!(plot.series[0].points[0].0 < plot.series[0].points[1].0);
+        assert_eq!(plot.series[1].name, "beta");
     }
 
     #[test]
-    fn downsamples_when_too_many_points() {
-        let plot = PlotData {
-            x_column: String::from("x"),
-            series: vec![PlotSeries {
-                y_column: String::from("y"),
-                points: (0..100).map(|i| (i as f64, i as f64)).collect(),
-            }],
-            derivative_series: Vec::new(),
-            x_bounds: [0.0, 99.0],
-            y_bounds: [0.0, 99.0],
-            derivative_y_bounds: [-1.0, 1.0],
-        };
+    fn parses_timestamp_values() {
+        let rfc3339 = parse_timestamp_value("2026-01-01T12:00:00Z").unwrap();
+        let naive = parse_timestamp_value("2026-01-01 12:00:00").unwrap();
+        let unix = parse_timestamp_value("1735732800").unwrap();
 
-        let sampled = visible_points(&plot.series[0].points, [0.0, 99.0], 20);
-
-        assert!(sampled.len() <= usize::from(20_u16.saturating_sub(HORIZONTAL_MARGIN)) + 1);
-        assert_eq!(sampled.first(), Some(&(0.0, 0.0)));
-        assert_eq!(sampled.last(), Some(&(99.0, 99.0)));
+        assert_eq!(rfc3339, naive);
+        assert_eq!(unix, 1_735_732_800.0);
     }
 
     #[test]
-    fn computes_derivative_points() {
-        assert_eq!(
-            compute_derivative_points(&[(0.0, 1.0), (0.5, 2.0), (1.0, 5.0)]),
-            vec![(0.5, 2.0), (1.0, 6.0)]
-        );
-    }
-
-    #[test]
-    fn reads_zst_csv_input() {
+    fn reads_xy_plot_data_from_zst_csv() {
         let path = temp_path("plot.csv.zst");
-        write_zst_file(&path, "t,x,v\n0.0,1.0,2.0\n1.0,3.0,4.0\n").unwrap();
+        write_zst_file(&path, "t,x\n0,1\n1,3\n").unwrap();
 
-        let csv = read_csv(&path).unwrap();
-        let plot = load_plot_data(&csv.headers, &csv.rows, "t", &[String::from("x")]).unwrap();
+        let plot = load_xy_plot_data(&read_csv(&path).unwrap(), "t", &[String::from("x")]).unwrap();
 
         assert_eq!(plot.series[0].points, vec![(0.0, 1.0), (1.0, 3.0)]);
+        fs::remove_file(path).unwrap();
+    }
 
-        let _ = fs::remove_file(path);
+    #[test]
+    fn reads_labeled_series_plot_data_from_plain_csv() {
+        let path = temp_path("plot_labels.csv");
+        write_file(
+            &path,
+            "label,stamp,signal\nalpha,2026-01-01T00:00:00Z,1.0\nalpha,2026-01-01T00:00:01Z,2.0\n",
+        )
+        .unwrap();
+
+        let plot =
+            load_labeled_series_plot_data(&read_csv(&path).unwrap(), "label", "stamp", "signal")
+                .unwrap();
+
+        assert_eq!(plot.series[0].name, "alpha");
+        assert_eq!(plot.series[0].points.len(), 2);
+        fs::remove_file(path).unwrap();
     }
 }
