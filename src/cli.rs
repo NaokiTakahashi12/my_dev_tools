@@ -4,7 +4,9 @@ use std::ffi::OsString;
 use std::path::PathBuf;
 
 use crate::tools::csv_plot;
-use crate::tools::{csv_anomaly_detect, csv_key_diff, csv_key_diff_extract, csv_pseudo_diff};
+use crate::tools::{
+    csv_anomaly_detect, csv_key_diff, csv_key_diff_extract, csv_label_split, csv_pseudo_diff,
+};
 
 #[derive(Debug, PartialEq)]
 enum Command {
@@ -31,6 +33,11 @@ enum Command {
         input: PathBuf,
         x_column: String,
         y_columns: Vec<String>,
+    },
+    CsvLabelSplit {
+        input: PathBuf,
+        label_column: String,
+        output_dir: Option<PathBuf>,
     },
     CsvPlot {
         input: PathBuf,
@@ -105,6 +112,17 @@ fn run_from_args(args: Vec<OsString>) -> Result<i32, Box<dyn Error>> {
             csv_anomaly_detect::run(&input, &x_column, &y_columns)?;
             Ok(0)
         }
+        Command::CsvLabelSplit {
+            input,
+            label_column,
+            output_dir,
+        } => {
+            let outputs = csv_label_split::run(&input, &label_column, output_dir.as_deref())?;
+            for output in outputs {
+                println!("{}", output.display());
+            }
+            Ok(0)
+        }
         Command::CsvPlot { input, mode } => run_csv_plot(&input, &mode),
     }
 }
@@ -119,6 +137,7 @@ fn parse_args(args: Vec<OsString>) -> Result<Command, Box<dyn Error>> {
         "csv_key_diff_extract" => parse_csv_key_diff_extract(&args[1..]),
         "csv_pseudo_diff" => parse_csv_pseudo_diff(&args[1..]),
         "csv_anomaly_detect" => parse_csv_anomaly_detect(&args[1..]),
+        "csv_label_split" => parse_csv_label_split(&args[1..]),
         "csv_plot" => parse_csv_plot(&args[1..]),
         _ => Err(format!("unknown command: {command}\n\n{}", usage()).into()),
     }
@@ -349,6 +368,53 @@ fn extend_unique_names(target: &mut Vec<String>, value: &str) {
     }
 }
 
+fn parse_csv_label_split(args: &[OsString]) -> Result<Command, Box<dyn Error>> {
+    if args.is_empty() {
+        return Err(String::from(
+            "csv_label_split requires INPUT --label-column NAME [--output-dir PATH]",
+        )
+        .into());
+    }
+
+    let input = PathBuf::from(&args[0]);
+    let mut label_column = None;
+    let mut output_dir = None;
+    let mut index = 1;
+
+    while index < args.len() {
+        match args[index].to_str() {
+            Some("--label-column") => {
+                let Some(value) = args.get(index + 1).and_then(|arg| arg.to_str()) else {
+                    return Err(String::from("missing value after --label-column").into());
+                };
+                label_column = Some(value.to_string());
+                index += 2;
+            }
+            Some("--output-dir") => {
+                let Some(value) = args.get(index + 1) else {
+                    return Err(String::from("missing value after --output-dir").into());
+                };
+                output_dir = Some(PathBuf::from(value));
+                index += 2;
+            }
+            Some(other) => {
+                return Err(format!("unexpected argument for csv_label_split: {other}").into());
+            }
+            None => return Err(String::from("arguments must be valid UTF-8").into()),
+        }
+    }
+
+    let Some(label_column) = label_column else {
+        return Err(String::from("csv_label_split requires --label-column NAME").into());
+    };
+
+    Ok(Command::CsvLabelSplit {
+        input,
+        label_column,
+        output_dir,
+    })
+}
+
 fn parse_csv_plot(args: &[OsString]) -> Result<Command, Box<dyn Error>> {
     if args.is_empty() {
         return Err(String::from(
@@ -471,6 +537,7 @@ fn usage() -> &'static str {
         "  my_dev_tools csv_anomaly_detect INPUT --x-column NAME --y-columns NAME[,NAME...]\n",
         "  my_dev_tools csv_key_diff LEFT RIGHT --key KEY [--key KEY ...]\n",
         "  my_dev_tools csv_key_diff_extract LEFT RIGHT DIFF --output_left PATH --output_right PATH\n",
+        "  my_dev_tools csv_label_split INPUT --label-column NAME [--output-dir PATH]\n",
         "  my_dev_tools csv_pseudo_diff INPUT --time-column NAME --value-column NAME --time-scale VALUE [--output PATH]\n",
         "  my_dev_tools csv_plot INPUT --x-column NAME --y-columns NAME[,NAME...]\n",
         "  my_dev_tools csv_plot INPUT --label-column NAME --timestamp-column NAME --value-column NAME\n"
@@ -580,6 +647,28 @@ mod tests {
                 input: PathBuf::from("input.csv"),
                 x_column: String::from("stamp"),
                 y_columns: vec![String::from("signal"), String::from("velocity")],
+            }
+        );
+    }
+
+    #[test]
+    fn parses_csv_label_split_command() {
+        let command = parse_args(os_args(&[
+            "csv_label_split",
+            "input.csv",
+            "--label-column",
+            "label",
+            "--output-dir",
+            "out",
+        ]))
+        .unwrap();
+
+        assert_eq!(
+            command,
+            Command::CsvLabelSplit {
+                input: PathBuf::from("input.csv"),
+                label_column: String::from("label"),
+                output_dir: Some(PathBuf::from("out")),
             }
         );
     }

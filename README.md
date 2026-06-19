@@ -65,6 +65,21 @@ cargo run -- csv_anomaly_detect input.csv \
   --y-columns signal,velocity
 ```
 
+## csv_label_split
+
+指定したラベル列の値ごとに CSV を分割し、ラベル列を除いた内容を個別の CSV ファイルとして出力します。ラベルが 5 種類あれば 5 ファイル出力され、元 CSV にラベル列以外が 10 列あれば各出力 CSV も 10 列になります。
+
+`--output-dir` を省略した場合はカレントディレクトリに出力します。出力ファイル名は `入力ファイル名_連番_ラベル名.csv` 形式で、ラベル名中のパスに使えない文字は `_` に置き換えます。
+
+```bash
+cargo run -- csv_label_split input.csv \
+  --label-column label
+
+cargo run -- csv_label_split input.csv \
+  --label-column label \
+  --output-dir split_csv
+```
+
 ## csv_plot
 
 指定した列をターミナル上でプロットします。プロット機能は常にビルド対象です。
