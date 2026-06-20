@@ -16,6 +16,8 @@ use ratatui::symbols::Marker;
 use ratatui::text::Line;
 use ratatui::widgets::{Axis, Block, Borders, Chart, Dataset, GraphType, Paragraph};
 use ratatui::{Frame, Terminal};
+use rustfft::FftPlanner;
+use rustfft::num_complex::Complex;
 
 use super::csv_key_diff::{CsvData, read_csv};
 
@@ -68,7 +70,9 @@ struct Viewport {
 struct PlotState {
     main_viewport: Viewport,
     derivative_y_bounds: [f64; 2],
+    fft_y_bounds: [f64; 2],
     show_derivative: bool,
+    show_fft: bool,
 }
 
 pub fn run_xy(
@@ -273,27 +277,54 @@ fn draw_plot(
             y_bounds: plot.y_bounds,
         },
         derivative_y_bounds: plot.derivative_y_bounds,
+        fft_y_bounds: [0.0, 1.0],
         show_derivative: false,
+        show_fft: false,
     };
 
     loop {
+        let fft_plot = state
+            .show_fft
+            .then(|| compute_fft_plot_data(&plot.series, state.main_viewport.x_bounds));
+        let fft_full_y_bounds = fft_plot.as_ref().map(|plot| plot.y_bounds);
+        if let Some(full_bounds) = fft_full_y_bounds {
+            state.fft_y_bounds = clamp_or_reset_bounds(state.fft_y_bounds, full_bounds);
+        }
+
         terminal.draw(|frame| {
             let area = frame.area();
             let [content_area, help_area] =
                 Layout::vertical([Constraint::Min(1), Constraint::Length(1)]).areas(area);
-            let (main_area, derivative_area) = if state.show_derivative {
-                let [main, derivative] = Layout::vertical([
-                    Constraint::Percentage(50),
-                    Constraint::Percentage(50),
-                ])
-                .areas(content_area);
-                (main, Some(derivative))
-            } else {
-                (content_area, None)
+
+            let areas = match (state.show_derivative, state.show_fft) {
+                (false, false) => {
+                    let [main] = Layout::vertical([Constraint::Min(1)]).areas(content_area);
+                    vec![main]
+                }
+                (true, false) | (false, true) => {
+                    let [main, secondary] = Layout::vertical([
+                        Constraint::Percentage(50),
+                        Constraint::Percentage(50),
+                    ])
+                    .areas(content_area);
+                    vec![main, secondary]
+                }
+                (true, true) => {
+                    let [main, secondary, tertiary] = Layout::vertical([
+                        Constraint::Percentage(34),
+                        Constraint::Percentage(33),
+                        Constraint::Percentage(33),
+                    ])
+                    .areas(content_area);
+                    vec![main, secondary, tertiary]
+                }
             };
             let help = Paragraph::new(
-                "q/Esc/Enter: exit  d: derivative panel  arrows/hjkl: pan  +/-: zoom  x/X: x zoom  y/Y: y zoom  0: reset",
+                "q/Esc/Enter: exit  d: derivative panel  f: fft panel  arrows/hjkl: pan  +/-: zoom  x/X: x zoom  y/Y: y zoom  0: reset",
             );
+            let mut area_index = 0;
+            let main_area = areas[area_index];
+            area_index += 1;
 
             render_chart(
                 frame,
@@ -304,7 +335,10 @@ fn draw_plot(
                 state.main_viewport.x_bounds,
                 state.main_viewport.y_bounds,
             );
-            if let Some(derivative_area) = derivative_area {
+
+            if state.show_derivative {
+                let derivative_area = areas[area_index];
+                area_index += 1;
                 render_chart(
                     frame,
                     derivative_area,
@@ -313,6 +347,19 @@ fn draw_plot(
                     "dy/dx",
                     state.main_viewport.x_bounds,
                     state.derivative_y_bounds,
+                );
+            }
+
+            if let Some(fft_plot) = &fft_plot {
+                let fft_area = areas[area_index];
+                render_chart(
+                    frame,
+                    fft_area,
+                    &fft_plot.series,
+                    &fft_plot.x_axis,
+                    "amplitude",
+                    fft_plot.x_bounds,
+                    state.fft_y_bounds,
                 );
             }
             frame.render_widget(help, help_area);
@@ -327,6 +374,7 @@ fn draw_plot(
             }
             Event::Key(key) if key.kind == KeyEventKind::Press => match key.code {
                 KeyCode::Char('d') => state.show_derivative = !state.show_derivative,
+                KeyCode::Char('f') => state.show_fft = !state.show_fft,
                 KeyCode::Left | KeyCode::Char('h') => {
                     pan_bounds(&mut state.main_viewport.x_bounds, plot.x_bounds, -0.1)
                 }
@@ -340,6 +388,9 @@ fn draw_plot(
                         plot.derivative_y_bounds,
                         -0.1,
                     );
+                    if let Some(full_bounds) = fft_full_y_bounds {
+                        pan_bounds(&mut state.fft_y_bounds, full_bounds, -0.1);
+                    }
                 }
                 KeyCode::Up | KeyCode::Char('k') => {
                     pan_bounds(&mut state.main_viewport.y_bounds, plot.y_bounds, 0.1);
@@ -348,6 +399,9 @@ fn draw_plot(
                         plot.derivative_y_bounds,
                         0.1,
                     );
+                    if let Some(full_bounds) = fft_full_y_bounds {
+                        pan_bounds(&mut state.fft_y_bounds, full_bounds, 0.1);
+                    }
                 }
                 KeyCode::Char('+') | KeyCode::Char('=') => {
                     zoom_bounds(&mut state.main_viewport.x_bounds, plot.x_bounds, 0.8);
@@ -357,6 +411,9 @@ fn draw_plot(
                         plot.derivative_y_bounds,
                         0.8,
                     );
+                    if let Some(full_bounds) = fft_full_y_bounds {
+                        zoom_bounds(&mut state.fft_y_bounds, full_bounds, 0.8);
+                    }
                 }
                 KeyCode::Char('-') => {
                     zoom_bounds(&mut state.main_viewport.x_bounds, plot.x_bounds, 1.25);
@@ -366,6 +423,9 @@ fn draw_plot(
                         plot.derivative_y_bounds,
                         1.25,
                     );
+                    if let Some(full_bounds) = fft_full_y_bounds {
+                        zoom_bounds(&mut state.fft_y_bounds, full_bounds, 1.25);
+                    }
                 }
                 KeyCode::Char('x') => {
                     zoom_bounds(&mut state.main_viewport.x_bounds, plot.x_bounds, 0.8)
@@ -380,6 +440,9 @@ fn draw_plot(
                         plot.derivative_y_bounds,
                         0.8,
                     );
+                    if let Some(full_bounds) = fft_full_y_bounds {
+                        zoom_bounds(&mut state.fft_y_bounds, full_bounds, 0.8);
+                    }
                 }
                 KeyCode::Char('Y') => {
                     zoom_bounds(&mut state.main_viewport.y_bounds, plot.y_bounds, 1.25);
@@ -388,11 +451,15 @@ fn draw_plot(
                         plot.derivative_y_bounds,
                         1.25,
                     );
+                    if let Some(full_bounds) = fft_full_y_bounds {
+                        zoom_bounds(&mut state.fft_y_bounds, full_bounds, 1.25);
+                    }
                 }
                 KeyCode::Char('0') => {
                     state.main_viewport.x_bounds = plot.x_bounds;
                     state.main_viewport.y_bounds = plot.y_bounds;
                     state.derivative_y_bounds = plot.derivative_y_bounds;
+                    state.fft_y_bounds = [0.0, 1.0];
                 }
                 _ => {}
             },
@@ -507,6 +574,126 @@ fn axis_bounds_or_default(values: impl Iterator<Item = f64>, default: [f64; 2]) 
         default
     } else {
         axis_bounds(collected.into_iter())
+    }
+}
+
+fn compute_fft_plot_data(series: &[PlotSeries], x_bounds: [f64; 2]) -> PlotData {
+    let fft_series = series
+        .iter()
+        .map(|series| PlotSeries {
+            name: format!("fft({})", series.name),
+            points: compute_fft_points(&series.points, x_bounds),
+        })
+        .collect::<Vec<_>>();
+    let x_values = fft_series
+        .iter()
+        .flat_map(|series| series.points.iter().map(|(x, _)| *x))
+        .collect::<Vec<_>>();
+    let y_values = fft_series
+        .iter()
+        .flat_map(|series| series.points.iter().map(|(_, y)| *y))
+        .collect::<Vec<_>>();
+
+    PlotData {
+        x_axis: AxisDescriptor {
+            label: String::from("frequency"),
+            kind: AxisKind::Numeric,
+        },
+        y_axis_label: String::from("amplitude"),
+        series: fft_series,
+        derivative_series: Vec::new(),
+        x_bounds: axis_bounds_or_default(x_values.into_iter(), [0.0, 1.0]),
+        y_bounds: axis_bounds_or_default(y_values.into_iter(), [0.0, 1.0]),
+        derivative_y_bounds: [0.0, 1.0],
+    }
+}
+
+fn compute_fft_points(points: &[(f64, f64)], x_bounds: [f64; 2]) -> Vec<(f64, f64)> {
+    let visible = visible_points(points, x_bounds, u16::MAX);
+    if visible.len() < 4 {
+        return Vec::new();
+    }
+
+    let sample_count = visible.len().next_power_of_two().min(1024);
+    if sample_count < 4 {
+        return Vec::new();
+    }
+
+    let start = visible.first().map(|(x, _)| *x).unwrap_or(x_bounds[0]);
+    let end = visible.last().map(|(x, _)| *x).unwrap_or(x_bounds[1]);
+    let duration = end - start;
+    if !duration.is_finite() || duration <= 0.0 {
+        return Vec::new();
+    }
+
+    let dt = duration / (sample_count.saturating_sub(1) as f64);
+    if !dt.is_finite() || dt <= 0.0 {
+        return Vec::new();
+    }
+
+    let uniform = resample_uniform(&visible, start, dt, sample_count);
+    let mean = uniform.iter().sum::<f64>() / uniform.len() as f64;
+    let mut buffer = uniform
+        .into_iter()
+        .map(|value| Complex::new(value - mean, 0.0))
+        .collect::<Vec<_>>();
+
+    let mut planner = FftPlanner::<f64>::new();
+    let fft = planner.plan_fft_forward(sample_count);
+    fft.process(&mut buffer);
+
+    let scale = sample_count as f64;
+    let half = sample_count / 2;
+    (0..=half)
+        .map(|index| {
+            let frequency = index as f64 / (sample_count as f64 * dt);
+            let amplitude = buffer[index].norm() / scale;
+            (frequency, amplitude)
+        })
+        .collect()
+}
+
+fn resample_uniform(points: &[(f64, f64)], start: f64, dt: f64, sample_count: usize) -> Vec<f64> {
+    let mut samples = Vec::with_capacity(sample_count);
+    let mut segment_index = 0;
+
+    for index in 0..sample_count {
+        let x = start + dt * index as f64;
+        while segment_index + 1 < points.len() && points[segment_index + 1].0 < x {
+            segment_index += 1;
+        }
+
+        let value = if segment_index + 1 >= points.len() {
+            points.last().map(|(_, y)| *y).unwrap_or(0.0)
+        } else {
+            interpolate_between(points[segment_index], points[segment_index + 1], x)
+        };
+        samples.push(value);
+    }
+
+    samples
+}
+
+fn interpolate_between((x0, y0): (f64, f64), (x1, y1): (f64, f64), x: f64) -> f64 {
+    let dx = x1 - x0;
+    if !dx.is_finite() || dx.abs() < f64::EPSILON {
+        y0
+    } else {
+        let t = ((x - x0) / dx).clamp(0.0, 1.0);
+        y0 + (y1 - y0) * t
+    }
+}
+
+fn clamp_or_reset_bounds(bounds: [f64; 2], full_bounds: [f64; 2]) -> [f64; 2] {
+    let width = bounds[1] - bounds[0];
+    let full_width = full_bounds[1] - full_bounds[0];
+    if !width.is_finite() || !full_width.is_finite() || width <= 0.0 || full_width <= 0.0 {
+        return full_bounds;
+    }
+    if bounds[0] < full_bounds[0] || bounds[1] > full_bounds[1] || width > full_width {
+        full_bounds
+    } else {
+        bounds
     }
 }
 
@@ -794,5 +981,26 @@ mod tests {
         assert_eq!(plot.series[0].name, "alpha");
         assert_eq!(plot.series[0].points.len(), 2);
         fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn computes_fft_peak_for_sine_wave() {
+        let points = (0..128)
+            .map(|index| {
+                let x = index as f64 * 0.1;
+                let y = (2.0 * std::f64::consts::PI * 1.0 * x).sin();
+                (x, y)
+            })
+            .collect::<Vec<_>>();
+
+        let fft = compute_fft_points(&points, [0.0, 12.7]);
+        let peak = fft
+            .iter()
+            .skip(1)
+            .max_by(|left, right| left.1.total_cmp(&right.1))
+            .copied()
+            .unwrap();
+
+        assert!((peak.0 - 1.0).abs() < 0.15, "peak frequency was {}", peak.0);
     }
 }

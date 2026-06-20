@@ -99,11 +99,12 @@ cargo run -- csv_plot input.csv \
 
 `--label-column` / `--timestamp-column` / `--value-column` を指定した場合は、ラベルごとに系列を自動で分割して時系列プロットします。タイムスタンプ列は Unix 秒、RFC3339、または UTC とみなせる `YYYY-MM-DD HH:MM:SS[.fraction]` / `YYYY/MM/DD HH:MM:SS[.fraction]` / `...T...` 形式を受け付けます。
 
-プロット画面は `q`、`Esc`、`Enter` で終了します。
+プロット画面は `q`、`Esc`、`Enter` で終了します。`d` で疑似微分ペイン、`f` で FFT ペインを切り替えられ、両方同時表示もできます。FFT は現在の表示範囲だけを対象に計算し、FFT ペインが非表示の間は計算しません。
 
 操作:
 
 - `d`: `dy/dx` の派生系列パネルを下段に表示/非表示
+- `f`: FFT パネルを下段に表示/非表示
 - `←` / `h`, `→` / `l`: X方向へ移動
 - `↑` / `k`, `↓` / `j`: Y方向へ移動
 - `+` / `=`: X/Y 同時にズームイン
