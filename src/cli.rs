@@ -1,6 +1,7 @@
 use std::env;
 use std::error::Error;
 use std::ffi::OsString;
+use std::path::Path;
 use std::path::PathBuf;
 
 use crate::tools::csv_plot;
@@ -10,38 +11,43 @@ use crate::tools::{
 
 #[derive(Debug, PartialEq)]
 enum Command {
-    CsvKeyDiff {
+    KeyDiff {
         left: PathBuf,
         right: PathBuf,
         keys: Vec<String>,
     },
-    CsvKeyDiffExtract {
+    KeyDiffExtract {
         left: PathBuf,
         right: PathBuf,
         diff: PathBuf,
         output_left: PathBuf,
         output_right: PathBuf,
     },
-    CsvPseudoDiff {
+    PseudoDiff {
         input: PathBuf,
         time_column: String,
         value_column: String,
         time_scale: f64,
         output: Option<PathBuf>,
     },
-    CsvAnomalyDetect {
+    AnomalyDetect {
         input: PathBuf,
         x_column: String,
         y_columns: Vec<String>,
     },
-    CsvLabelSplit {
+    LabelSplit {
         input: PathBuf,
         label_column: String,
         output_dir: Option<PathBuf>,
     },
-    CsvPlot {
+    Plot {
         input: PathBuf,
         mode: CsvPlotCommand,
+    },
+    PowerSpectrum {
+        input: PathBuf,
+        x_column: String,
+        y_column: String,
     },
 }
 
@@ -65,14 +71,14 @@ pub fn run() -> Result<i32, Box<dyn Error>> {
 
 fn run_from_args(args: Vec<OsString>) -> Result<i32, Box<dyn Error>> {
     match parse_args(args)? {
-        Command::CsvKeyDiff { left, right, keys } => {
+        Command::KeyDiff { left, right, keys } => {
             let left_csv = csv_key_diff::read_csv(&left)?;
             let right_csv = csv_key_diff::read_csv(&right)?;
             let report = csv_key_diff::diff_csv(&left_csv, &right_csv, &keys);
             println!("{}", csv_key_diff::render_diff(&report));
             Ok(report.has_differences().into())
         }
-        Command::CsvKeyDiffExtract {
+        Command::KeyDiffExtract {
             left,
             right,
             diff,
@@ -88,7 +94,7 @@ fn run_from_args(args: Vec<OsString>) -> Result<i32, Box<dyn Error>> {
             )?;
             Ok(0)
         }
-        Command::CsvPseudoDiff {
+        Command::PseudoDiff {
             input,
             time_column,
             value_column,
@@ -104,7 +110,7 @@ fn run_from_args(args: Vec<OsString>) -> Result<i32, Box<dyn Error>> {
             )?;
             Ok(0)
         }
-        Command::CsvAnomalyDetect {
+        Command::AnomalyDetect {
             input,
             x_column,
             y_columns,
@@ -112,7 +118,7 @@ fn run_from_args(args: Vec<OsString>) -> Result<i32, Box<dyn Error>> {
             csv_anomaly_detect::run(&input, &x_column, &y_columns)?;
             Ok(0)
         }
-        Command::CsvLabelSplit {
+        Command::LabelSplit {
             input,
             label_column,
             output_dir,
@@ -123,7 +129,15 @@ fn run_from_args(args: Vec<OsString>) -> Result<i32, Box<dyn Error>> {
             }
             Ok(0)
         }
-        Command::CsvPlot { input, mode } => run_csv_plot(&input, &mode),
+        Command::Plot { input, mode } => run_csv_plot(&input, &mode),
+        Command::PowerSpectrum {
+            input,
+            x_column,
+            y_column,
+        } => {
+            csv_plot::run_power_spectrum(&input, &x_column, &y_column)?;
+            Ok(0)
+        }
     }
 }
 
@@ -139,6 +153,7 @@ fn parse_args(args: Vec<OsString>) -> Result<Command, Box<dyn Error>> {
         "csv_anomaly_detect" => parse_csv_anomaly_detect(&args[1..]),
         "csv_label_split" => parse_csv_label_split(&args[1..]),
         "csv_plot" => parse_csv_plot(&args[1..]),
+        "csv_power_spectrum" => parse_csv_power_spectrum(&args[1..]),
         _ => Err(format!("unknown command: {command}\n\n{}", usage()).into()),
     }
 }
@@ -176,7 +191,7 @@ fn parse_csv_key_diff(args: &[OsString]) -> Result<Command, Box<dyn Error>> {
         return Err(String::from("csv_key_diff requires at least one --key VALUE pair").into());
     }
 
-    Ok(Command::CsvKeyDiff { left, right, keys })
+    Ok(Command::KeyDiff { left, right, keys })
 }
 
 fn parse_csv_key_diff_extract(args: &[OsString]) -> Result<Command, Box<dyn Error>> {
@@ -226,7 +241,7 @@ fn parse_csv_key_diff_extract(args: &[OsString]) -> Result<Command, Box<dyn Erro
         return Err(String::from("csv_key_diff_extract requires --output_right PATH").into());
     };
 
-    Ok(Command::CsvKeyDiffExtract {
+    Ok(Command::KeyDiffExtract {
         left,
         right,
         diff,
@@ -297,7 +312,7 @@ fn parse_csv_pseudo_diff(args: &[OsString]) -> Result<Command, Box<dyn Error>> {
         return Err(String::from("csv_pseudo_diff requires --time-scale VALUE").into());
     };
 
-    Ok(Command::CsvPseudoDiff {
+    Ok(Command::PseudoDiff {
         input,
         time_column,
         value_column,
@@ -349,7 +364,7 @@ fn parse_csv_anomaly_detect(args: &[OsString]) -> Result<Command, Box<dyn Error>
         return Err(String::from("csv_anomaly_detect requires --y-columns NAME[,NAME...]").into());
     }
 
-    Ok(Command::CsvAnomalyDetect {
+    Ok(Command::AnomalyDetect {
         input,
         x_column,
         y_columns,
@@ -408,7 +423,7 @@ fn parse_csv_label_split(args: &[OsString]) -> Result<Command, Box<dyn Error>> {
         return Err(String::from("csv_label_split requires --label-column NAME").into());
     };
 
-    Ok(Command::CsvLabelSplit {
+    Ok(Command::LabelSplit {
         input,
         label_column,
         output_dir,
@@ -509,10 +524,60 @@ fn parse_csv_plot(args: &[OsString]) -> Result<Command, Box<dyn Error>> {
         return Err(String::from("csv_plot requires --x-column together with --y-columns").into());
     };
 
-    Ok(Command::CsvPlot { input, mode })
+    Ok(Command::Plot { input, mode })
 }
 
-fn run_csv_plot(input: &PathBuf, mode: &CsvPlotCommand) -> Result<i32, Box<dyn Error>> {
+fn parse_csv_power_spectrum(args: &[OsString]) -> Result<Command, Box<dyn Error>> {
+    if args.is_empty() {
+        return Err(String::from(
+            "csv_power_spectrum requires INPUT --x-column NAME --y-column NAME",
+        )
+        .into());
+    }
+
+    let input = PathBuf::from(&args[0]);
+    let mut x_column = None;
+    let mut y_column = None;
+    let mut index = 1;
+
+    while index < args.len() {
+        match args[index].to_str() {
+            Some("--x-column") => {
+                let Some(value) = args.get(index + 1).and_then(|arg| arg.to_str()) else {
+                    return Err(String::from("missing value after --x-column").into());
+                };
+                x_column = Some(value.to_string());
+                index += 2;
+            }
+            Some("--y-column") => {
+                let Some(value) = args.get(index + 1).and_then(|arg| arg.to_str()) else {
+                    return Err(String::from("missing value after --y-column").into());
+                };
+                y_column = Some(value.to_string());
+                index += 2;
+            }
+            Some(other) => {
+                return Err(format!("unexpected argument for csv_power_spectrum: {other}").into());
+            }
+            None => return Err(String::from("arguments must be valid UTF-8").into()),
+        }
+    }
+
+    let Some(x_column) = x_column else {
+        return Err(String::from("csv_power_spectrum requires --x-column NAME").into());
+    };
+    let Some(y_column) = y_column else {
+        return Err(String::from("csv_power_spectrum requires --y-column NAME").into());
+    };
+
+    Ok(Command::PowerSpectrum {
+        input,
+        x_column,
+        y_column,
+    })
+}
+
+fn run_csv_plot(input: &Path, mode: &CsvPlotCommand) -> Result<i32, Box<dyn Error>> {
     match mode {
         CsvPlotCommand::XY {
             x_column,
@@ -538,6 +603,7 @@ fn usage() -> &'static str {
         "  my_dev_tools csv_key_diff LEFT RIGHT --key KEY [--key KEY ...]\n",
         "  my_dev_tools csv_key_diff_extract LEFT RIGHT DIFF --output_left PATH --output_right PATH\n",
         "  my_dev_tools csv_label_split INPUT --label-column NAME [--output-dir PATH]\n",
+        "  my_dev_tools csv_power_spectrum INPUT --x-column NAME --y-column NAME\n",
         "  my_dev_tools csv_pseudo_diff INPUT --time-column NAME --value-column NAME --time-scale VALUE [--output PATH]\n",
         "  my_dev_tools csv_plot INPUT --x-column NAME --y-columns NAME[,NAME...]\n",
         "  my_dev_tools csv_plot INPUT --label-column NAME --timestamp-column NAME --value-column NAME\n"
@@ -567,7 +633,7 @@ mod tests {
 
         assert_eq!(
             command,
-            Command::CsvKeyDiff {
+            Command::KeyDiff {
                 left: PathBuf::from("left.csv"),
                 right: PathBuf::from("right.csv"),
                 keys: vec![String::from("id"), String::from("sub_id")],
@@ -591,7 +657,7 @@ mod tests {
 
         assert_eq!(
             command,
-            Command::CsvKeyDiffExtract {
+            Command::KeyDiffExtract {
                 left: PathBuf::from("left.csv"),
                 right: PathBuf::from("right.csv"),
                 diff: PathBuf::from("diff.txt"),
@@ -619,7 +685,7 @@ mod tests {
 
         assert_eq!(
             command,
-            Command::CsvPseudoDiff {
+            Command::PseudoDiff {
                 input: PathBuf::from("input.csv"),
                 time_column: String::from("t"),
                 value_column: String::from("x"),
@@ -643,7 +709,7 @@ mod tests {
 
         assert_eq!(
             command,
-            Command::CsvAnomalyDetect {
+            Command::AnomalyDetect {
                 input: PathBuf::from("input.csv"),
                 x_column: String::from("stamp"),
                 y_columns: vec![String::from("signal"), String::from("velocity")],
@@ -665,7 +731,7 @@ mod tests {
 
         assert_eq!(
             command,
-            Command::CsvLabelSplit {
+            Command::LabelSplit {
                 input: PathBuf::from("input.csv"),
                 label_column: String::from("label"),
                 output_dir: Some(PathBuf::from("out")),
@@ -687,7 +753,7 @@ mod tests {
 
         assert_eq!(
             command,
-            Command::CsvPlot {
+            Command::Plot {
                 input: PathBuf::from("input.csv"),
                 mode: CsvPlotCommand::XY {
                     x_column: String::from("stamp"),
@@ -713,7 +779,7 @@ mod tests {
 
         assert_eq!(
             command,
-            Command::CsvPlot {
+            Command::Plot {
                 input: PathBuf::from("input.csv"),
                 mode: CsvPlotCommand::XY {
                     x_column: String::from("stamp"),
@@ -739,13 +805,35 @@ mod tests {
 
         assert_eq!(
             command,
-            Command::CsvPlot {
+            Command::Plot {
                 input: PathBuf::from("input.csv"),
                 mode: CsvPlotCommand::LabeledSeries {
                     label_column: String::from("label"),
                     timestamp_column: String::from("stamp"),
                     value_column: String::from("signal"),
                 },
+            }
+        );
+    }
+
+    #[test]
+    fn parses_csv_power_spectrum_command() {
+        let command = parse_args(os_args(&[
+            "csv_power_spectrum",
+            "input.csv",
+            "--x-column",
+            "stamp",
+            "--y-column",
+            "signal",
+        ]))
+        .unwrap();
+
+        assert_eq!(
+            command,
+            Command::PowerSpectrum {
+                input: PathBuf::from("input.csv"),
+                x_column: String::from("stamp"),
+                y_column: String::from("signal"),
             }
         );
     }

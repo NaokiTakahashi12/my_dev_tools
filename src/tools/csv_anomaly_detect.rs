@@ -49,14 +49,14 @@ fn detect_anomalies(
         let residuals = compute_residuals(&x_values, &y_values);
         let scores = local_scores(&residuals);
 
-        for row_index in 0..rows.len() {
+        for (row_index, row_masks) in masks.iter_mut().enumerate() {
             let step_mask = detect_step_mask(&y_values, row_index);
             let spike_mask = if step_mask == 0 {
                 detect_spike_mask(&residuals, &scores, row_index)
             } else {
                 0
             };
-            masks[row_index][column_offset] = spike_mask | step_mask;
+            row_masks[column_offset] = spike_mask | step_mask;
         }
     }
 
@@ -238,7 +238,7 @@ fn local_scores(residuals: &[Option<f64>]) -> Vec<Option<f64>> {
 fn median(mut values: Vec<f64>) -> f64 {
     values.sort_by(f64::total_cmp);
     let mid = values.len() / 2;
-    if values.len() % 2 == 0 {
+    if values.len().is_multiple_of(2) {
         (values[mid - 1] + values[mid]) / 2.0
     } else {
         values[mid]

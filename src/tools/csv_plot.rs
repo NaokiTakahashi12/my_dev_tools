@@ -35,11 +35,33 @@ const SERIES_COLORS: [Color; 6] = [
 struct PlotData {
     x_axis: AxisDescriptor,
     y_axis_label: String,
+    title: String,
     series: Vec<PlotSeries>,
     derivative_series: Vec<PlotSeries>,
     x_bounds: [f64; 2],
     y_bounds: [f64; 2],
     derivative_y_bounds: [f64; 2],
+    allow_derivative_panel: bool,
+    allow_fft_panel: bool,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+struct PlotConfig {
+    x_axis: AxisDescriptor,
+    y_axis_label: String,
+    title: String,
+    allow_derivative_panel: bool,
+    allow_fft_panel: bool,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct ChartView<'a> {
+    series: &'a [PlotSeries],
+    x_axis: &'a AxisDescriptor,
+    y_label: &'a str,
+    title: &'a str,
+    x_bounds: [f64; 2],
+    y_bounds: [f64; 2],
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -96,6 +118,16 @@ pub fn run_labeled_series(
     run_plot(plot)
 }
 
+pub fn run_power_spectrum(
+    input_path: &Path,
+    x_column: &str,
+    y_column: &str,
+) -> Result<(), Box<dyn Error>> {
+    let csv = read_csv(input_path)?;
+    let plot = load_power_spectrum_plot_data(&csv, x_column, y_column)?;
+    run_plot(plot)
+}
+
 fn run_plot(plot: PlotData) -> Result<(), Box<dyn Error>> {
     let mut terminal = setup_terminal()?;
     let result = draw_plot(&mut terminal, &plot);
@@ -139,11 +171,16 @@ fn load_xy_plot_data(
     }
 
     build_plot_data(
-        AxisDescriptor {
-            label: x_column.to_string(),
-            kind: AxisKind::Numeric,
+        PlotConfig {
+            x_axis: AxisDescriptor {
+                label: x_column.to_string(),
+                kind: AxisKind::Numeric,
+            },
+            y_axis_label: "y".to_string(),
+            title: format!("{} vs {}", y_columns.join(", "), x_column),
+            allow_derivative_panel: true,
+            allow_fft_panel: true,
         },
-        "y".to_string(),
         series,
         x_values,
         y_values,
@@ -198,20 +235,74 @@ fn load_labeled_series_plot_data(
     series.sort_by(|left, right| left.name.cmp(&right.name));
 
     build_plot_data(
-        AxisDescriptor {
-            label: timestamp_column.to_string(),
-            kind: AxisKind::Timestamp,
+        PlotConfig {
+            x_axis: AxisDescriptor {
+                label: timestamp_column.to_string(),
+                kind: AxisKind::Timestamp,
+            },
+            y_axis_label: value_column.to_string(),
+            title: format!("{value_column} vs {timestamp_column}"),
+            allow_derivative_panel: true,
+            allow_fft_panel: true,
         },
-        value_column.to_string(),
         series,
         x_values,
         y_values,
     )
 }
 
+fn load_power_spectrum_plot_data(
+    csv: &CsvData,
+    x_column: &str,
+    y_column: &str,
+) -> Result<PlotData, Box<dyn Error>> {
+    let x_index = find_column_index(&csv.headers, x_column)?;
+    let y_index = find_column_index(&csv.headers, y_column)?;
+    let mut points = Vec::with_capacity(csv.rows.len());
+
+    for (row_index, row) in csv.rows.iter().enumerate() {
+        let x = parse_f64_cell(row, x_index, x_column, row_index)?;
+        let y = parse_f64_cell(row, y_index, y_column, row_index)?;
+        points.push((x, y));
+    }
+
+    if points.len() < 4 {
+        return Err(String::from("csv_power_spectrum requires at least four rows").into());
+    }
+
+    points.sort_by(|left, right| left.0.total_cmp(&right.0));
+    let x_bounds = axis_bounds(points.iter().map(|(x, _)| *x));
+    let spectrum_points = compute_spectrum_points(&points, x_bounds, SpectrumMode::Power);
+    if spectrum_points.is_empty() {
+        return Err(String::from("csv_power_spectrum could not compute spectrum").into());
+    }
+
+    let spectrum_x_bounds = axis_bounds(spectrum_points.iter().map(|(x, _)| *x));
+    let spectrum_y_bounds =
+        axis_bounds_or_default(spectrum_points.iter().map(|(_, y)| *y), [0.0, 1.0]);
+
+    Ok(PlotData {
+        x_axis: AxisDescriptor {
+            label: String::from("frequency"),
+            kind: AxisKind::Numeric,
+        },
+        y_axis_label: String::from("power"),
+        title: format!("power({y_column}) vs frequency"),
+        series: vec![PlotSeries {
+            name: format!("power({y_column})"),
+            points: spectrum_points,
+        }],
+        derivative_series: Vec::new(),
+        x_bounds: spectrum_x_bounds,
+        y_bounds: spectrum_y_bounds,
+        derivative_y_bounds: [0.0, 1.0],
+        allow_derivative_panel: false,
+        allow_fft_panel: false,
+    })
+}
+
 fn build_plot_data(
-    x_axis: AxisDescriptor,
-    y_axis_label: String,
+    config: PlotConfig,
     mut series: Vec<PlotSeries>,
     x_values: Vec<f64>,
     y_values: Vec<f64>,
@@ -228,7 +319,7 @@ fn build_plot_data(
     let derivative_series = series
         .iter()
         .map(|series| PlotSeries {
-            name: format!("d({})/d{}", series.name, x_axis.label),
+            name: format!("d({})/d{}", series.name, config.x_axis.label),
             points: compute_derivative_points(&series.points),
         })
         .collect::<Vec<_>>();
@@ -238,13 +329,16 @@ fn build_plot_data(
         .collect::<Vec<_>>();
 
     Ok(PlotData {
-        x_axis,
-        y_axis_label,
+        x_axis: config.x_axis,
+        y_axis_label: config.y_axis_label,
+        title: config.title,
         series,
         derivative_series,
         x_bounds: axis_bounds(x_values.into_iter()),
         y_bounds: axis_bounds(y_values.into_iter()),
         derivative_y_bounds: axis_bounds_or_default(derivative_y_values.into_iter(), [-1.0, 1.0]),
+        allow_derivative_panel: config.allow_derivative_panel,
+        allow_fft_panel: config.allow_fft_panel,
     })
 }
 
@@ -283,9 +377,10 @@ fn draw_plot(
     };
 
     loop {
-        let fft_plot = state
-            .show_fft
-            .then(|| compute_fft_plot_data(&plot.series, state.main_viewport.x_bounds));
+        let show_derivative = plot.allow_derivative_panel && state.show_derivative;
+        let show_fft = plot.allow_fft_panel && state.show_fft;
+        let fft_plot =
+            show_fft.then(|| compute_fft_plot_data(&plot.series, state.main_viewport.x_bounds));
         let fft_full_y_bounds = fft_plot.as_ref().map(|plot| plot.y_bounds);
         if let Some(full_bounds) = fft_full_y_bounds {
             state.fft_y_bounds = clamp_or_reset_bounds(state.fft_y_bounds, full_bounds);
@@ -296,17 +391,15 @@ fn draw_plot(
             let [content_area, help_area] =
                 Layout::vertical([Constraint::Min(1), Constraint::Length(1)]).areas(area);
 
-            let areas = match (state.show_derivative, state.show_fft) {
+            let areas = match (show_derivative, show_fft) {
                 (false, false) => {
                     let [main] = Layout::vertical([Constraint::Min(1)]).areas(content_area);
                     vec![main]
                 }
                 (true, false) | (false, true) => {
-                    let [main, secondary] = Layout::vertical([
-                        Constraint::Percentage(50),
-                        Constraint::Percentage(50),
-                    ])
-                    .areas(content_area);
+                    let [main, secondary] =
+                        Layout::vertical([Constraint::Percentage(50), Constraint::Percentage(50)])
+                            .areas(content_area);
                     vec![main, secondary]
                 }
                 (true, true) => {
@@ -319,9 +412,7 @@ fn draw_plot(
                     vec![main, secondary, tertiary]
                 }
             };
-            let help = Paragraph::new(
-                "q/Esc/Enter: exit  d: derivative panel  f: fft panel  arrows/hjkl: pan  +/-: zoom  x/X: x zoom  y/Y: y zoom  0: reset",
-            );
+            let help = Paragraph::new(help_text(plot.allow_derivative_panel, plot.allow_fft_panel));
             let mut area_index = 0;
             let main_area = areas[area_index];
             area_index += 1;
@@ -329,24 +420,30 @@ fn draw_plot(
             render_chart(
                 frame,
                 main_area,
-                &plot.series,
-                &plot.x_axis,
-                &plot.y_axis_label,
-                state.main_viewport.x_bounds,
-                state.main_viewport.y_bounds,
+                ChartView {
+                    series: &plot.series,
+                    x_axis: &plot.x_axis,
+                    y_label: &plot.y_axis_label,
+                    title: &plot.title,
+                    x_bounds: state.main_viewport.x_bounds,
+                    y_bounds: state.main_viewport.y_bounds,
+                },
             );
 
-            if state.show_derivative {
+            if show_derivative {
                 let derivative_area = areas[area_index];
                 area_index += 1;
                 render_chart(
                     frame,
                     derivative_area,
-                    &plot.derivative_series,
-                    &plot.x_axis,
-                    "dy/dx",
-                    state.main_viewport.x_bounds,
-                    state.derivative_y_bounds,
+                    ChartView {
+                        series: &plot.derivative_series,
+                        x_axis: &plot.x_axis,
+                        y_label: "dy/dx",
+                        title: "derivative",
+                        x_bounds: state.main_viewport.x_bounds,
+                        y_bounds: state.derivative_y_bounds,
+                    },
                 );
             }
 
@@ -355,11 +452,14 @@ fn draw_plot(
                 render_chart(
                     frame,
                     fft_area,
-                    &fft_plot.series,
-                    &fft_plot.x_axis,
-                    "amplitude",
-                    fft_plot.x_bounds,
-                    state.fft_y_bounds,
+                    ChartView {
+                        series: &fft_plot.series,
+                        x_axis: &fft_plot.x_axis,
+                        y_label: "amplitude",
+                        title: "fft",
+                        x_bounds: fft_plot.x_bounds,
+                        y_bounds: state.fft_y_bounds,
+                    },
                 );
             }
             frame.render_widget(help, help_area);
@@ -373,8 +473,10 @@ fn draw_plot(
                 return Ok(());
             }
             Event::Key(key) if key.kind == KeyEventKind::Press => match key.code {
-                KeyCode::Char('d') => state.show_derivative = !state.show_derivative,
-                KeyCode::Char('f') => state.show_fft = !state.show_fft,
+                KeyCode::Char('d') if plot.allow_derivative_panel => {
+                    state.show_derivative = !state.show_derivative
+                }
+                KeyCode::Char('f') if plot.allow_fft_panel => state.show_fft = !state.show_fft,
                 KeyCode::Left | KeyCode::Char('h') => {
                     pan_bounds(&mut state.main_viewport.x_bounds, plot.x_bounds, -0.1)
                 }
@@ -469,22 +571,16 @@ fn draw_plot(
     }
 }
 
-fn render_chart(
-    frame: &mut Frame,
-    area: ratatui::layout::Rect,
-    series: &[PlotSeries],
-    x_axis: &AxisDescriptor,
-    y_label: &str,
-    x_bounds: [f64; 2],
-    y_bounds: [f64; 2],
-) {
-    let x_labels = axis_labels(x_bounds, &x_axis.kind);
-    let y_labels = axis_labels(y_bounds, &AxisKind::Numeric);
-    let sampled_series = series
+fn render_chart(frame: &mut Frame, area: ratatui::layout::Rect, view: ChartView<'_>) {
+    let x_labels = axis_labels(view.x_bounds, &view.x_axis.kind);
+    let y_labels = axis_labels(view.y_bounds, &AxisKind::Numeric);
+    let sampled_series = view
+        .series
         .iter()
-        .map(|series| visible_points(&series.points, x_bounds, area.width))
+        .map(|series| visible_points(&series.points, view.x_bounds, area.width))
         .collect::<Vec<_>>();
-    let datasets = series
+    let datasets = view
+        .series
         .iter()
         .zip(sampled_series.iter())
         .enumerate()
@@ -501,27 +597,19 @@ fn render_chart(
     let chart = Chart::new(datasets)
         .block(
             Block::default()
-                .title(format!(
-                    "{} vs {}",
-                    series
-                        .iter()
-                        .map(|series| series.name.as_str())
-                        .collect::<Vec<_>>()
-                        .join(", "),
-                    x_axis.label
-                ))
+                .title(view.title.to_string())
                 .borders(Borders::ALL),
         )
         .x_axis(
             Axis::default()
-                .title(Line::from(x_axis.label.clone()))
-                .bounds(x_bounds)
+                .title(Line::from(view.x_axis.label.clone()))
+                .bounds(view.x_bounds)
                 .labels(x_labels),
         )
         .y_axis(
             Axis::default()
-                .title(Line::from(y_label.to_string()))
-                .bounds(y_bounds)
+                .title(Line::from(view.y_label.to_string()))
+                .bounds(view.y_bounds)
                 .labels(y_labels),
         );
 
@@ -600,15 +688,32 @@ fn compute_fft_plot_data(series: &[PlotSeries], x_bounds: [f64; 2]) -> PlotData 
             kind: AxisKind::Numeric,
         },
         y_axis_label: String::from("amplitude"),
+        title: String::from("fft"),
         series: fft_series,
         derivative_series: Vec::new(),
         x_bounds: axis_bounds_or_default(x_values.into_iter(), [0.0, 1.0]),
         y_bounds: axis_bounds_or_default(y_values.into_iter(), [0.0, 1.0]),
         derivative_y_bounds: [0.0, 1.0],
+        allow_derivative_panel: false,
+        allow_fft_panel: false,
     }
 }
 
 fn compute_fft_points(points: &[(f64, f64)], x_bounds: [f64; 2]) -> Vec<(f64, f64)> {
+    compute_spectrum_points(points, x_bounds, SpectrumMode::Amplitude)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SpectrumMode {
+    Amplitude,
+    Power,
+}
+
+fn compute_spectrum_points(
+    points: &[(f64, f64)],
+    x_bounds: [f64; 2],
+    spectrum_mode: SpectrumMode,
+) -> Vec<(f64, f64)> {
     let visible = visible_points(points, x_bounds, u16::MAX);
     if visible.len() < 4 {
         return Vec::new();
@@ -648,9 +753,29 @@ fn compute_fft_points(points: &[(f64, f64)], x_bounds: [f64; 2]) -> Vec<(f64, f6
         .map(|index| {
             let frequency = index as f64 / (sample_count as f64 * dt);
             let amplitude = buffer[index].norm() / scale;
-            (frequency, amplitude)
+            let value = match spectrum_mode {
+                SpectrumMode::Amplitude => amplitude,
+                SpectrumMode::Power => amplitude * amplitude,
+            };
+            (frequency, value)
         })
         .collect()
+}
+
+fn help_text(allow_derivative_panel: bool, allow_fft_panel: bool) -> String {
+    let mut parts = vec![String::from("q/Esc/Enter: exit")];
+    if allow_derivative_panel {
+        parts.push(String::from("d: derivative panel"));
+    }
+    if allow_fft_panel {
+        parts.push(String::from("f: fft panel"));
+    }
+    parts.push(String::from("arrows/hjkl: pan"));
+    parts.push(String::from("+/-: zoom"));
+    parts.push(String::from("x/X: x zoom"));
+    parts.push(String::from("y/Y: y zoom"));
+    parts.push(String::from("0: reset"));
+    parts.join("  ")
 }
 
 fn resample_uniform(points: &[(f64, f64)], start: f64, dt: f64, sample_count: usize) -> Vec<f64> {
@@ -818,8 +943,7 @@ fn parse_timestamp_value(value: &str) -> Option<f64> {
 
     DateTime::parse_from_rfc3339(value)
         .ok()
-        .map(|timestamp| timestamp.timestamp_nanos_opt().map(nanos_to_seconds))
-        .flatten()
+        .and_then(|timestamp| timestamp.timestamp_nanos_opt().map(nanos_to_seconds))
         .or_else(|| parse_naive_timestamp(value))
 }
 
@@ -1002,5 +1126,28 @@ mod tests {
             .unwrap();
 
         assert!((peak.0 - 1.0).abs() < 0.15, "peak frequency was {}", peak.0);
+    }
+
+    #[test]
+    fn loads_power_spectrum_plot_data() {
+        let csv = CsvData {
+            path: Path::new("input.csv").to_path_buf(),
+            headers: vec![String::from("t"), String::from("signal")],
+            rows: (0..128)
+                .map(|index| {
+                    let x = index as f64 * 0.1;
+                    let y = (2.0 * std::f64::consts::PI * x).sin();
+                    vec![x.to_string(), y.to_string()]
+                })
+                .collect(),
+        };
+
+        let plot = load_power_spectrum_plot_data(&csv, "t", "signal").unwrap();
+
+        assert_eq!(plot.x_axis.label, "frequency");
+        assert_eq!(plot.y_axis_label, "power");
+        assert!(!plot.series[0].points.is_empty());
+        assert!(!plot.allow_derivative_panel);
+        assert!(!plot.allow_fft_panel);
     }
 }

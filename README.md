@@ -112,3 +112,13 @@ cargo run -- csv_plot input.csv \
 - `x` / `X`: X方向だけズームイン / アウト
 - `y` / `Y`: Y方向だけズームイン / アウト
 - `0`: 表示範囲を全体表示にリセット
+
+## csv_power_spectrum
+
+指定した時系列 `x` 列と `y` 列からパワースペクトラムを計算し、CLI 上でプロットします。入力範囲全体を用いて等間隔に再サンプリングした後、周波数ごとのパワーを表示します。
+
+```bash
+cargo run -- csv_power_spectrum input.csv \
+  --x-column stamp \
+  --y-column signal
+```
