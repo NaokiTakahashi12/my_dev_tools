@@ -13,7 +13,7 @@ use ratatui::backend::CrosstermBackend;
 use ratatui::layout::{Constraint, Layout};
 use ratatui::style::{Color, Style};
 use ratatui::symbols::Marker;
-use ratatui::text::Line;
+use ratatui::text::{Line, Span};
 use ratatui::widgets::{Axis, Block, Borders, Chart, Dataset, GraphType, Paragraph};
 use ratatui::{Frame, Terminal};
 use rustfft::FftPlanner;
@@ -33,6 +33,7 @@ const SERIES_COLORS: [Color; 6] = [
 
 #[derive(Debug, Clone, PartialEq)]
 struct PlotData {
+    kind: PlotKind,
     x_axis: AxisDescriptor,
     y_axis_label: String,
     title: String,
@@ -46,7 +47,14 @@ struct PlotData {
 }
 
 #[derive(Debug, Clone, PartialEq)]
+enum PlotKind {
+    Line,
+    HeatmapSource(HeatmapSource),
+}
+
+#[derive(Debug, Clone, PartialEq)]
 struct PlotConfig {
+    kind: PlotKind,
     x_axis: AxisDescriptor,
     y_axis_label: String,
     title: String,
@@ -62,6 +70,28 @@ struct ChartView<'a> {
     title: &'a str,
     x_bounds: [f64; 2],
     y_bounds: [f64; 2],
+}
+
+#[derive(Debug, Clone, Copy)]
+struct HeatmapView<'a> {
+    heatmap_source: &'a HeatmapSource,
+    x_axis: &'a AxisDescriptor,
+    y_label: &'a str,
+    title: &'a str,
+    x_bounds: [f64; 2],
+    y_bounds: [f64; 2],
+}
+
+#[derive(Debug, Clone)]
+struct HeatmapRenderData {
+    rows: Vec<Line<'static>>,
+    value_bounds: [f64; 2],
+}
+
+#[derive(Debug, Clone, PartialEq)]
+struct HeatmapSource {
+    points: Vec<(f64, f64)>,
+    sample_spacing: f64,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -172,6 +202,7 @@ fn load_xy_plot_data(
 
     build_plot_data(
         PlotConfig {
+            kind: PlotKind::Line,
             x_axis: AxisDescriptor {
                 label: x_column.to_string(),
                 kind: AxisKind::Numeric,
@@ -236,6 +267,7 @@ fn load_labeled_series_plot_data(
 
     build_plot_data(
         PlotConfig {
+            kind: PlotKind::Line,
             x_axis: AxisDescriptor {
                 label: timestamp_column.to_string(),
                 kind: AxisKind::Timestamp,
@@ -271,30 +303,26 @@ fn load_power_spectrum_plot_data(
     }
 
     points.sort_by(|left, right| left.0.total_cmp(&right.0));
+    let sample_spacing = infer_sample_spacing(&points)?;
+    let nyquist_frequency = 0.5 / sample_spacing;
     let x_bounds = axis_bounds(points.iter().map(|(x, _)| *x));
-    let spectrum_points = compute_spectrum_points(&points, x_bounds, SpectrumMode::Power);
-    if spectrum_points.is_empty() {
-        return Err(String::from("csv_power_spectrum could not compute spectrum").into());
-    }
-
-    let spectrum_x_bounds = axis_bounds(spectrum_points.iter().map(|(x, _)| *x));
-    let spectrum_y_bounds =
-        axis_bounds_or_default(spectrum_points.iter().map(|(_, y)| *y), [0.0, 1.0]);
+    let y_bounds = [0.0, nyquist_frequency.max(1e-9)];
 
     Ok(PlotData {
+        kind: PlotKind::HeatmapSource(HeatmapSource {
+            points,
+            sample_spacing,
+        }),
         x_axis: AxisDescriptor {
-            label: String::from("frequency"),
+            label: x_column.to_string(),
             kind: AxisKind::Numeric,
         },
-        y_axis_label: String::from("power"),
-        title: format!("power({y_column}) vs frequency"),
-        series: vec![PlotSeries {
-            name: format!("power({y_column})"),
-            points: spectrum_points,
-        }],
+        y_axis_label: String::from("frequency"),
+        title: format!("spectrogram({y_column})"),
+        series: Vec::new(),
         derivative_series: Vec::new(),
-        x_bounds: spectrum_x_bounds,
-        y_bounds: spectrum_y_bounds,
+        x_bounds,
+        y_bounds,
         derivative_y_bounds: [0.0, 1.0],
         allow_derivative_panel: false,
         allow_fft_panel: false,
@@ -329,6 +357,7 @@ fn build_plot_data(
         .collect::<Vec<_>>();
 
     Ok(PlotData {
+        kind: config.kind,
         x_axis: config.x_axis,
         y_axis_label: config.y_axis_label,
         title: config.title,
@@ -417,18 +446,32 @@ fn draw_plot(
             let main_area = areas[area_index];
             area_index += 1;
 
-            render_chart(
-                frame,
-                main_area,
-                ChartView {
-                    series: &plot.series,
-                    x_axis: &plot.x_axis,
-                    y_label: &plot.y_axis_label,
-                    title: &plot.title,
-                    x_bounds: state.main_viewport.x_bounds,
-                    y_bounds: state.main_viewport.y_bounds,
-                },
-            );
+            match &plot.kind {
+                PlotKind::Line => render_chart(
+                    frame,
+                    main_area,
+                    ChartView {
+                        series: &plot.series,
+                        x_axis: &plot.x_axis,
+                        y_label: &plot.y_axis_label,
+                        title: &plot.title,
+                        x_bounds: state.main_viewport.x_bounds,
+                        y_bounds: state.main_viewport.y_bounds,
+                    },
+                ),
+                PlotKind::HeatmapSource(source) => render_heatmap(
+                    frame,
+                    main_area,
+                    HeatmapView {
+                        heatmap_source: source,
+                        x_axis: &plot.x_axis,
+                        y_label: &plot.y_axis_label,
+                        title: &plot.title,
+                        x_bounds: state.main_viewport.x_bounds,
+                        y_bounds: state.main_viewport.y_bounds,
+                    },
+                ),
+            }
 
             if show_derivative {
                 let derivative_area = areas[area_index];
@@ -616,6 +659,161 @@ fn render_chart(frame: &mut Frame, area: ratatui::layout::Rect, view: ChartView<
     frame.render_widget(chart, area);
 }
 
+fn render_heatmap(frame: &mut Frame, area: ratatui::layout::Rect, view: HeatmapView<'_>) {
+    let block = Block::default()
+        .title(view.title.to_string())
+        .borders(Borders::ALL);
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+    if inner.width < 4 || inner.height < 3 {
+        return;
+    }
+
+    let [body_area, x_label_area] =
+        Layout::vertical([Constraint::Min(1), Constraint::Length(1)]).areas(inner);
+    let [y_label_area, heatmap_with_legend_area] =
+        Layout::horizontal([Constraint::Length(10), Constraint::Min(1)]).areas(body_area);
+    let [heatmap_area, legend_area] =
+        Layout::horizontal([Constraint::Min(1), Constraint::Length(10)])
+            .areas(heatmap_with_legend_area);
+
+    let x_lines = vec![Line::from(vec![
+        Span::raw(format_axis_value(view.x_bounds[0], &view.x_axis.kind)),
+        Span::raw(" "),
+        Span::raw(view.x_axis.label.clone()),
+        Span::raw(" "),
+        Span::raw(format_axis_value(view.x_bounds[1], &view.x_axis.kind)),
+    ])];
+    frame.render_widget(Paragraph::new(x_lines), x_label_area);
+
+    let y_lines = vec![
+        Line::from(format_axis_value(view.y_bounds[1], &AxisKind::Numeric)),
+        Line::from(view.y_label.to_string()),
+        Line::from(format_axis_value(view.y_bounds[0], &AxisKind::Numeric)),
+    ];
+    frame.render_widget(Paragraph::new(y_lines), y_label_area);
+
+    let render_data = render_heatmap_lines(
+        view.heatmap_source,
+        view.x_bounds,
+        view.y_bounds,
+        heatmap_area.width,
+        heatmap_area.height,
+    );
+    frame.render_widget(Paragraph::new(render_data.rows), heatmap_area);
+    render_heatmap_legend(frame, legend_area, render_data.value_bounds);
+}
+
+fn render_heatmap_lines(
+    heatmap_source: &HeatmapSource,
+    x_bounds: [f64; 2],
+    y_bounds: [f64; 2],
+    width: u16,
+    height: u16,
+) -> HeatmapRenderData {
+    let width = usize::from(width.max(1));
+    let height = usize::from(height.max(1));
+    let intensities = compute_heatmap_grid(heatmap_source, x_bounds, y_bounds, width, height);
+    let bounds = axis_bounds_or_default(
+        intensities
+            .iter()
+            .flat_map(|row| row.iter().copied())
+            .filter(|value| value.is_finite()),
+        [0.0, 1.0],
+    );
+
+    let rows = intensities
+        .into_iter()
+        .map(|row| {
+            Line::from(
+                row.into_iter()
+                    .map(|value| {
+                        Span::styled(
+                            " ",
+                            Style::default()
+                                .bg(heatmap_color(normalize_heatmap_value(value, bounds))),
+                        )
+                    })
+                    .collect::<Vec<_>>(),
+            )
+        })
+        .collect();
+
+    HeatmapRenderData {
+        rows,
+        value_bounds: bounds,
+    }
+}
+
+fn render_heatmap_legend(frame: &mut Frame, area: ratatui::layout::Rect, value_bounds: [f64; 2]) {
+    if area.width < 3 || area.height < 4 {
+        return;
+    }
+
+    let [label_area, bar_area] =
+        Layout::horizontal([Constraint::Length(7), Constraint::Length(2)]).areas(area);
+    let height = usize::from(bar_area.height.max(1));
+    let rows = (0..height)
+        .map(|row| {
+            let ratio = 1.0 - (row as f64 + 0.5) / height as f64;
+            Line::from(vec![Span::styled(
+                "  ",
+                Style::default().bg(heatmap_color(ratio)),
+            )])
+        })
+        .collect::<Vec<_>>();
+    frame.render_widget(Paragraph::new(rows), bar_area);
+
+    let midpoint = (value_bounds[0] + value_bounds[1]) / 2.0;
+    let labels = vec![
+        Line::from("Power"),
+        Line::from(format_number(value_bounds[1])),
+        Line::from(""),
+        Line::from(format_number(midpoint)),
+        Line::from(""),
+        Line::from(format_number(value_bounds[0])),
+    ];
+    frame.render_widget(Paragraph::new(labels), label_area);
+}
+
+fn normalize_heatmap_value(value: f64, bounds: [f64; 2]) -> f64 {
+    let range = bounds[1] - bounds[0];
+    if !range.is_finite() || range <= 0.0 {
+        0.0
+    } else {
+        ((value - bounds[0]) / range).clamp(0.0, 1.0)
+    }
+}
+
+fn heatmap_color(intensity: f64) -> Color {
+    let stops = [
+        (0.0, (10_u8, 10_u8, 30_u8)),
+        (0.25, (0_u8, 90_u8, 160_u8)),
+        (0.5, (0_u8, 170_u8, 120_u8)),
+        (0.75, (230_u8, 200_u8, 30_u8)),
+        (1.0, (250_u8, 80_u8, 20_u8)),
+    ];
+
+    for window in stops.windows(2) {
+        let (left_pos, left_rgb) = window[0];
+        let (right_pos, right_rgb) = window[1];
+        if intensity <= right_pos {
+            let t = ((intensity - left_pos) / (right_pos - left_pos)).clamp(0.0, 1.0);
+            return Color::Rgb(
+                lerp_channel(left_rgb.0, right_rgb.0, t),
+                lerp_channel(left_rgb.1, right_rgb.1, t),
+                lerp_channel(left_rgb.2, right_rgb.2, t),
+            );
+        }
+    }
+
+    Color::Rgb(250, 80, 20)
+}
+
+fn lerp_channel(start: u8, end: u8, t: f64) -> u8 {
+    (start as f64 + (end as f64 - start as f64) * t).round() as u8
+}
+
 fn axis_labels(bounds: [f64; 2], axis_kind: &AxisKind) -> Vec<Line<'static>> {
     let midpoint = (bounds[0] + bounds[1]) / 2.0;
     vec![
@@ -683,6 +881,7 @@ fn compute_fft_plot_data(series: &[PlotSeries], x_bounds: [f64; 2]) -> PlotData 
         .collect::<Vec<_>>();
 
     PlotData {
+        kind: PlotKind::Line,
         x_axis: AxisDescriptor {
             label: String::from("frequency"),
             kind: AxisKind::Numeric,
@@ -700,20 +899,6 @@ fn compute_fft_plot_data(series: &[PlotSeries], x_bounds: [f64; 2]) -> PlotData 
 }
 
 fn compute_fft_points(points: &[(f64, f64)], x_bounds: [f64; 2]) -> Vec<(f64, f64)> {
-    compute_spectrum_points(points, x_bounds, SpectrumMode::Amplitude)
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum SpectrumMode {
-    Amplitude,
-    Power,
-}
-
-fn compute_spectrum_points(
-    points: &[(f64, f64)],
-    x_bounds: [f64; 2],
-    spectrum_mode: SpectrumMode,
-) -> Vec<(f64, f64)> {
     let visible = visible_points(points, x_bounds, u16::MAX);
     if visible.len() < 4 {
         return Vec::new();
@@ -753,13 +938,92 @@ fn compute_spectrum_points(
         .map(|index| {
             let frequency = index as f64 / (sample_count as f64 * dt);
             let amplitude = buffer[index].norm() / scale;
-            let value = match spectrum_mode {
-                SpectrumMode::Amplitude => amplitude,
-                SpectrumMode::Power => amplitude * amplitude,
-            };
-            (frequency, value)
+            (frequency, amplitude)
         })
         .collect()
+}
+
+fn infer_sample_spacing(points: &[(f64, f64)]) -> Result<f64, Box<dyn Error>> {
+    let intervals = points
+        .windows(2)
+        .map(|window| window[1].0 - window[0].0)
+        .filter(|interval| interval.is_finite() && *interval > 0.0)
+        .collect::<Vec<_>>();
+    if intervals.is_empty() {
+        return Err(String::from("csv_power_spectrum requires increasing x values").into());
+    }
+    Ok(intervals.iter().sum::<f64>() / intervals.len() as f64)
+}
+
+fn compute_heatmap_grid(
+    source: &HeatmapSource,
+    x_bounds: [f64; 2],
+    y_bounds: [f64; 2],
+    width: usize,
+    height: usize,
+) -> Vec<Vec<f64>> {
+    if width == 0 || height == 0 {
+        return Vec::new();
+    }
+
+    let visible_duration = (x_bounds[1] - x_bounds[0]).max(source.sample_spacing * 4.0);
+    let samples_per_column =
+        ((visible_duration / source.sample_spacing) / width.max(1) as f64).max(1.0);
+    let window_size = ((samples_per_column * 8.0).ceil() as usize)
+        .clamp(32, 512)
+        .next_power_of_two();
+    let half_window_duration = source.sample_spacing * window_size as f64 / 2.0;
+    let nyquist_frequency = 0.5 / source.sample_spacing;
+    let clamped_y_bounds = [
+        y_bounds[0].clamp(0.0, nyquist_frequency),
+        y_bounds[1].clamp(0.0, nyquist_frequency),
+    ];
+
+    let mut planner = FftPlanner::<f64>::new();
+    let fft = planner.plan_fft_forward(window_size);
+    let half = window_size / 2;
+    let mut rows = vec![vec![0.0; width]; height];
+
+    for column in 0..width {
+        let ratio = (column as f64 + 0.5) / width as f64;
+        let center_time = x_bounds[0] + (x_bounds[1] - x_bounds[0]) * ratio;
+        let window_start = center_time - half_window_duration;
+        let samples = resample_uniform(
+            &source.points,
+            window_start,
+            source.sample_spacing,
+            window_size,
+        );
+        let mean = samples.iter().sum::<f64>() / samples.len() as f64;
+        let mut buffer = samples
+            .into_iter()
+            .enumerate()
+            .map(|(index, value)| {
+                let hann = 0.5
+                    - 0.5
+                        * (2.0 * std::f64::consts::PI * index as f64
+                            / (window_size.saturating_sub(1).max(1) as f64))
+                            .cos();
+                Complex::new((value - mean) * hann, 0.0)
+            })
+            .collect::<Vec<_>>();
+        fft.process(&mut buffer);
+
+        for (row_index, row) in rows.iter_mut().enumerate() {
+            let frequency_ratio = 1.0 - (row_index as f64 + 0.5) / height as f64;
+            let target_frequency =
+                clamped_y_bounds[0] + (clamped_y_bounds[1] - clamped_y_bounds[0]) * frequency_ratio;
+            let fft_index =
+                ((target_frequency * window_size as f64 * source.sample_spacing).round() as usize)
+                    .min(half);
+            let clamped_index = fft_index.min(buffer.len().saturating_sub(1));
+            let amplitude = buffer[clamped_index].norm() / window_size as f64;
+            let power = amplitude * amplitude;
+            row[column] = (power + 1e-12).log10();
+        }
+    }
+
+    rows
 }
 
 fn help_text(allow_derivative_panel: bool, allow_fft_panel: bool) -> String {
@@ -1144,10 +1408,56 @@ mod tests {
 
         let plot = load_power_spectrum_plot_data(&csv, "t", "signal").unwrap();
 
-        assert_eq!(plot.x_axis.label, "frequency");
-        assert_eq!(plot.y_axis_label, "power");
-        assert!(!plot.series[0].points.is_empty());
+        assert_eq!(plot.x_axis.label, "t");
+        assert_eq!(plot.y_axis_label, "frequency");
+        assert!(matches!(plot.kind, PlotKind::HeatmapSource(_)));
+        assert!(plot.series.is_empty());
         assert!(!plot.allow_derivative_panel);
         assert!(!plot.allow_fft_panel);
+    }
+
+    #[test]
+    fn computes_heatmap_grid_with_multiple_time_bins() {
+        let points = (0..128)
+            .map(|index| {
+                let x = index as f64 * 0.1;
+                let y = if index < 64 {
+                    (2.0 * std::f64::consts::PI * 1.0 * x).sin()
+                } else {
+                    (2.0 * std::f64::consts::PI * 4.0 * x).sin()
+                };
+                (x, y)
+            })
+            .collect::<Vec<_>>();
+
+        let heatmap_source = HeatmapSource {
+            sample_spacing: infer_sample_spacing(&points).unwrap(),
+            points,
+        };
+        let grid = compute_heatmap_grid(&heatmap_source, [0.0, 12.7], [0.0, 5.0], 24, 12);
+
+        assert_eq!(grid.len(), 12);
+        assert_eq!(grid[0].len(), 24);
+    }
+
+    #[test]
+    fn heatmap_grid_changes_with_y_zoom_range() {
+        let points = (0..128)
+            .map(|index| {
+                let x = index as f64 * 0.1;
+                let y = (2.0 * std::f64::consts::PI * 1.0 * x).sin()
+                    + 0.3 * (2.0 * std::f64::consts::PI * 4.0 * x).sin();
+                (x, y)
+            })
+            .collect::<Vec<_>>();
+
+        let heatmap_source = HeatmapSource {
+            sample_spacing: infer_sample_spacing(&points).unwrap(),
+            points,
+        };
+        let low_band = compute_heatmap_grid(&heatmap_source, [0.0, 12.7], [0.0, 2.0], 16, 8);
+        let high_band = compute_heatmap_grid(&heatmap_source, [0.0, 12.7], [3.0, 5.0], 16, 8);
+
+        assert_ne!(low_band, high_band);
     }
 }
