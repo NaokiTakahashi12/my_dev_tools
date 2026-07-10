@@ -83,6 +83,7 @@ pub fn read_csv(path: &Path) -> Result<CsvData, Box<dyn Error>> {
         .iter()
         .map(ToOwned::to_owned)
         .collect::<Vec<_>>();
+    validate_unique_headers(&headers)?;
 
     let mut rows = Vec::new();
     for record in reader.records() {
@@ -95,6 +96,16 @@ pub fn read_csv(path: &Path) -> Result<CsvData, Box<dyn Error>> {
         headers,
         rows,
     })
+}
+
+fn validate_unique_headers(headers: &[String]) -> Result<(), Box<dyn Error>> {
+    let mut seen = HashSet::new();
+    for header in headers {
+        if !seen.insert(header) {
+            return Err(format!("duplicate CSV header: {header}").into());
+        }
+    }
+    Ok(())
 }
 
 fn read_csv_bytes(path: &Path) -> Result<Vec<u8>, Box<dyn Error>> {
@@ -573,6 +584,17 @@ mod tests {
         assert_eq!(csv.rows, vec![vec![String::from("1"), String::from("10")]]);
 
         let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn rejects_duplicate_headers() {
+        let path = temp_path("duplicate_headers.csv");
+        fs::write(&path, "id,id\n1,2\n").unwrap();
+
+        let error = read_csv(&path).unwrap_err();
+
+        assert!(error.to_string().contains("duplicate CSV header: id"));
+        fs::remove_file(path).unwrap();
     }
 
     #[test]

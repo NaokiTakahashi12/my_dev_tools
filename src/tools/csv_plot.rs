@@ -190,9 +190,14 @@ pub fn save_image_labeled_series(
 
 fn run_plot(plot: PlotData) -> Result<(), Box<dyn Error>> {
     let mut terminal = setup_terminal()?;
-    let result = draw_plot(&mut terminal, &plot);
-    restore_terminal(&mut terminal)?;
-    result
+    let draw_result = draw_plot(&mut terminal, &plot);
+    let restore_result = restore_terminal(&mut terminal);
+
+    match (draw_result, restore_result) {
+        (Err(draw_error), _) => Err(draw_error),
+        (Ok(()), Err(restore_error)) => Err(restore_error),
+        (Ok(()), Ok(())) => Ok(()),
+    }
 }
 
 fn load_xy_plot_data(
@@ -470,19 +475,36 @@ fn image_series_color(index: usize) -> RGBColor {
 fn setup_terminal() -> Result<Terminal<CrosstermBackend<std::io::Stdout>>, Box<dyn Error>> {
     enable_raw_mode()?;
     let mut out = stdout();
-    execute!(out, EnterAlternateScreen)?;
+    if let Err(error) = execute!(out, EnterAlternateScreen) {
+        let _ = disable_raw_mode();
+        return Err(error.into());
+    }
     let backend = CrosstermBackend::new(out);
-    let mut terminal = Terminal::new(backend)?;
-    terminal.clear()?;
+    let mut terminal = match Terminal::new(backend) {
+        Ok(terminal) => terminal,
+        Err(error) => {
+            let _ = execute!(stdout(), LeaveAlternateScreen);
+            let _ = disable_raw_mode();
+            return Err(error.into());
+        }
+    };
+    if let Err(error) = terminal.clear() {
+        let _ = restore_terminal(&mut terminal);
+        return Err(error.into());
+    }
     Ok(terminal)
 }
 
 fn restore_terminal(
     terminal: &mut Terminal<CrosstermBackend<std::io::Stdout>>,
 ) -> Result<(), Box<dyn Error>> {
-    disable_raw_mode()?;
-    execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
-    terminal.show_cursor()?;
+    let raw_mode_result = disable_raw_mode();
+    let screen_result = execute!(terminal.backend_mut(), LeaveAlternateScreen);
+    let cursor_result = terminal.show_cursor();
+
+    raw_mode_result?;
+    screen_result?;
+    cursor_result?;
     Ok(())
 }
 
@@ -862,7 +884,7 @@ fn render_heatmap_legend(frame: &mut Frame, area: ratatui::layout::Rect, value_b
 
     let midpoint = (value_bounds[0] + value_bounds[1]) / 2.0;
     let labels = vec![
-        Line::from("Power"),
+        Line::from("Power (dB)"),
         Line::from(format_number(value_bounds[1])),
         Line::from(""),
         Line::from(format_number(midpoint)),
@@ -1033,7 +1055,11 @@ fn compute_fft_points(points: &[(f64, f64)], x_bounds: [f64; 2]) -> Vec<(f64, f6
     (0..=half)
         .map(|index| {
             let frequency = index as f64 / (sample_count as f64 * dt);
-            let amplitude = buffer[index].norm() / scale;
+            let amplitude = if index == 0 || index == half {
+                buffer[index].norm() / scale
+            } else {
+                2.0 * buffer[index].norm() / scale
+            };
             (frequency, amplitude)
         })
         .collect()
@@ -1042,11 +1068,19 @@ fn compute_fft_points(points: &[(f64, f64)], x_bounds: [f64; 2]) -> Vec<(f64, f6
 fn infer_sample_spacing(points: &[(f64, f64)]) -> Result<f64, Box<dyn Error>> {
     let intervals = points
         .windows(2)
-        .map(|window| window[1].0 - window[0].0)
-        .filter(|interval| interval.is_finite() && *interval > 0.0)
-        .collect::<Vec<_>>();
+        .map(|window| {
+            let interval = window[1].0 - window[0].0;
+            if !interval.is_finite() || interval <= 0.0 {
+                Err(String::from(
+                    "csv_power_spectrum requires strictly increasing x values",
+                ))
+            } else {
+                Ok(interval)
+            }
+        })
+        .collect::<Result<Vec<_>, _>>()?;
     if intervals.is_empty() {
-        return Err(String::from("csv_power_spectrum requires increasing x values").into());
+        return Err(String::from("csv_power_spectrum requires at least two x values").into());
     }
     Ok(intervals.iter().sum::<f64>() / intervals.len() as f64)
 }
@@ -1115,7 +1149,7 @@ fn compute_heatmap_grid(
             let clamped_index = fft_index.min(buffer.len().saturating_sub(1));
             let amplitude = buffer[clamped_index].norm() / window_size as f64;
             let power = amplitude * amplitude;
-            row[column] = (power + 1e-12).log10();
+            row[column] = 10.0 * (power + 1e-12).log10();
         }
     }
 
@@ -1140,10 +1174,21 @@ fn help_text(allow_derivative_panel: bool, allow_fft_panel: bool) -> String {
 
 fn resample_uniform(points: &[(f64, f64)], start: f64, dt: f64, sample_count: usize) -> Vec<f64> {
     let mut samples = Vec::with_capacity(sample_count);
+    let Some(&(first_x, _)) = points.first() else {
+        return vec![0.0; sample_count];
+    };
+    let last_x = points.last().map(|(x, _)| *x).unwrap_or(first_x);
+    let boundary_tolerance = (last_x - first_x).abs().max(1.0) * f64::EPSILON * 4.0;
     let mut segment_index = 0;
 
     for index in 0..sample_count {
         let x = start + dt * index as f64;
+        if x < first_x - boundary_tolerance || x > last_x + boundary_tolerance {
+            samples.push(0.0);
+            continue;
+        }
+
+        let x = x.clamp(first_x, last_x);
         while segment_index + 1 < points.len() && points[segment_index + 1].0 < x {
             segment_index += 1;
         }
@@ -1516,10 +1561,12 @@ mod tests {
 
     #[test]
     fn computes_fft_peak_for_sine_wave() {
+        let sample_spacing = 0.1;
+        let frequency = 10.0 / (128.0 * sample_spacing);
         let points = (0..128)
             .map(|index| {
-                let x = index as f64 * 0.1;
-                let y = (2.0 * std::f64::consts::PI * 1.0 * x).sin();
+                let x = index as f64 * sample_spacing;
+                let y = (2.0 * std::f64::consts::PI * frequency * x).sin();
                 (x, y)
             })
             .collect::<Vec<_>>();
@@ -1532,7 +1579,37 @@ mod tests {
             .copied()
             .unwrap();
 
-        assert!((peak.0 - 1.0).abs() < 0.15, "peak frequency was {}", peak.0);
+        assert!(
+            (peak.0 - frequency).abs() < 0.01,
+            "peak frequency was {}",
+            peak.0
+        );
+        assert!((peak.1 - 1.0).abs() < 0.1, "peak amplitude was {}", peak.1);
+    }
+
+    #[test]
+    fn rejects_duplicate_timestamps_for_power_spectrum() {
+        let csv = CsvData {
+            path: Path::new("input.csv").to_path_buf(),
+            headers: vec![String::from("t"), String::from("signal")],
+            rows: vec![
+                vec![String::from("0"), String::from("0")],
+                vec![String::from("1"), String::from("1")],
+                vec![String::from("1"), String::from("0")],
+                vec![String::from("2"), String::from("-1")],
+            ],
+        };
+
+        let error = load_power_spectrum_plot_data(&csv, "t", "signal").unwrap_err();
+
+        assert!(error.to_string().contains("strictly increasing x values"));
+    }
+
+    #[test]
+    fn zero_pads_samples_outside_the_data_range() {
+        let samples = resample_uniform(&[(0.0, 1.0), (1.0, 1.0)], -1.0, 1.0, 4);
+
+        assert_eq!(samples, vec![0.0, 1.0, 1.0, 0.0]);
     }
 
     #[test]

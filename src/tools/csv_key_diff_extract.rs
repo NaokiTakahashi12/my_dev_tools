@@ -28,6 +28,8 @@ pub fn extract_diff_rows_to_files(
     let right_csv = csv_key_diff::read_csv(right_path)?;
     let diff_text = fs::read_to_string(diff_path)?;
     let selection = parse_diff_selection(&diff_text)?;
+    validate_selection_columns(&left_csv, &selection, "left")?;
+    validate_selection_columns(&right_csv, &selection, "right")?;
 
     let left_rows = extract_rows(&left_csv, &selection);
     let right_rows = extract_rows(&right_csv, &selection);
@@ -35,6 +37,19 @@ pub fn extract_diff_rows_to_files(
     write_csv(output_left_path, &left_csv.headers, &left_rows)?;
     write_csv(output_right_path, &right_csv.headers, &right_rows)?;
 
+    Ok(())
+}
+
+fn validate_selection_columns(
+    csv: &CsvData,
+    selection: &DiffSelection,
+    side: &str,
+) -> Result<(), Box<dyn Error>> {
+    for column in &selection.key_columns {
+        if !csv.headers.iter().any(|header| header == column) {
+            return Err(format!("{side} CSV is missing diff key column: {column}").into());
+        }
+    }
     Ok(())
 }
 
@@ -98,6 +113,11 @@ fn extract_key_from_row(
 }
 
 fn write_csv(path: &Path, headers: &[String], rows: &[Vec<String>]) -> Result<(), Box<dyn Error>> {
+    if let Some(parent) = path.parent()
+        && !parent.as_os_str().is_empty()
+    {
+        fs::create_dir_all(parent)?;
+    }
     let mut writer = csv::Writer::from_path(path)?;
     writer.write_record(headers)?;
     for row in rows {
@@ -122,10 +142,28 @@ fn parse_diff_selection(diff_text: &str) -> Result<DiffSelection, Box<dyn Error>
         }
     }
 
-    Ok(DiffSelection {
-        key_columns: key_columns.unwrap_or_default(),
-        rows,
-    })
+    let key_columns = key_columns
+        .filter(|columns| !columns.is_empty())
+        .ok_or_else(|| String::from("diff does not contain a keys line"))?;
+
+    let selection = DiffSelection { key_columns, rows };
+    validate_row_selectors(&selection)?;
+    Ok(selection)
+}
+
+fn validate_row_selectors(selection: &DiffSelection) -> Result<(), Box<dyn Error>> {
+    for selector in &selection.rows {
+        if selector
+            .key
+            .0
+            .iter()
+            .map(|(column, _)| column)
+            .ne(selection.key_columns.iter())
+        {
+            return Err(String::from("diff row key does not match the keys line").into());
+        }
+    }
+    Ok(())
 }
 
 fn parse_key_columns_line(line: &str) -> Option<Vec<String>> {
@@ -305,6 +343,22 @@ mod tests {
             parse_key_columns_line("keys: id, sub_id"),
             Some(vec![String::from("id"), String::from("sub_id")])
         );
+    }
+
+    #[test]
+    fn rejects_diff_without_key_columns() {
+        let error = parse_diff_selection("@@ header differences @@\n").unwrap_err();
+
+        assert!(error.to_string().contains("does not contain a keys line"));
+    }
+
+    #[test]
+    fn rejects_selector_with_different_key_columns() {
+        let error =
+            parse_diff_selection("keys: id\n@@ key [other=\"1\"] occurrence 1 modified @@\n")
+                .unwrap_err();
+
+        assert!(error.to_string().contains("does not match the keys line"));
     }
 
     #[test]
