@@ -1,5 +1,6 @@
 use std::collections::BTreeMap;
 use std::error::Error;
+use std::fs;
 use std::io::stdout;
 use std::path::Path;
 
@@ -9,6 +10,11 @@ use crossterm::execute;
 use crossterm::terminal::{
     EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
 };
+use plotters::prelude::{
+    BLACK, BitMapBackend, ChartBuilder, IntoDrawingArea, IntoFont, LineSeries, PathElement,
+    RGBColor, WHITE,
+};
+use plotters::style::Color as PlottersColor;
 use ratatui::backend::CrosstermBackend;
 use ratatui::layout::{Constraint, Layout};
 use ratatui::style::{Color, Style};
@@ -22,6 +28,7 @@ use rustfft::num_complex::Complex;
 use super::csv_key_diff::{CsvData, read_csv};
 
 const HORIZONTAL_MARGIN: u16 = 12;
+const DEFAULT_IMAGE_SIZE: (u32, u32) = (1600, 900);
 const SERIES_COLORS: [Color; 6] = [
     Color::Cyan,
     Color::Yellow,
@@ -156,6 +163,29 @@ pub fn run_power_spectrum(
     let csv = read_csv(input_path)?;
     let plot = load_power_spectrum_plot_data(&csv, x_column, y_column)?;
     run_plot(plot)
+}
+
+pub fn save_image_xy(
+    input_path: &Path,
+    x_column: &str,
+    y_columns: &[String],
+    output_path: &Path,
+) -> Result<(), Box<dyn Error>> {
+    let csv = read_csv(input_path)?;
+    let plot = load_xy_plot_data(&csv, x_column, y_columns)?;
+    save_line_plot_image(&plot, output_path)
+}
+
+pub fn save_image_labeled_series(
+    input_path: &Path,
+    label_column: &str,
+    timestamp_column: &str,
+    value_column: &str,
+    output_path: &Path,
+) -> Result<(), Box<dyn Error>> {
+    let csv = read_csv(input_path)?;
+    let plot = load_labeled_series_plot_data(&csv, label_column, timestamp_column, value_column)?;
+    save_line_plot_image(&plot, output_path)
 }
 
 fn run_plot(plot: PlotData) -> Result<(), Box<dyn Error>> {
@@ -369,6 +399,72 @@ fn build_plot_data(
         allow_derivative_panel: config.allow_derivative_panel,
         allow_fft_panel: config.allow_fft_panel,
     })
+}
+
+fn save_line_plot_image(plot: &PlotData, output_path: &Path) -> Result<(), Box<dyn Error>> {
+    if !matches!(plot.kind, PlotKind::Line) {
+        return Err(String::from("image export supports line plots only").into());
+    }
+
+    if let Some(parent) = output_path.parent()
+        && !parent.as_os_str().is_empty()
+    {
+        fs::create_dir_all(parent)?;
+    }
+
+    let root = BitMapBackend::new(output_path, DEFAULT_IMAGE_SIZE).into_drawing_area();
+    root.fill(&WHITE)?;
+
+    let mut chart = ChartBuilder::on(&root)
+        .margin(24)
+        .caption(plot.title.clone(), ("sans-serif", 32).into_font())
+        .x_label_area_size(56)
+        .y_label_area_size(64)
+        .build_cartesian_2d(
+            plot.x_bounds[0]..plot.x_bounds[1],
+            plot.y_bounds[0]..plot.y_bounds[1],
+        )?;
+
+    chart
+        .configure_mesh()
+        .x_desc(plot.x_axis.label.clone())
+        .y_desc(plot.y_axis_label.clone())
+        .x_label_formatter(&|value| format_axis_value(*value, &plot.x_axis.kind))
+        .y_label_formatter(&|value| format_number(*value))
+        .light_line_style(WHITE.mix(0.15))
+        .draw()?;
+
+    for (index, series) in plot.series.iter().enumerate() {
+        let color = image_series_color(index);
+        chart
+            .draw_series(LineSeries::new(series.points.iter().copied(), &color))?
+            .label(series.name.clone())
+            .legend(move |(x, y)| {
+                PathElement::new(vec![(x, y), (x + 24, y)], color.stroke_width(3))
+            });
+    }
+
+    chart
+        .configure_series_labels()
+        .border_style(BLACK)
+        .background_style(WHITE.mix(0.85))
+        .draw()?;
+
+    root.present()?;
+    Ok(())
+}
+
+fn image_series_color(index: usize) -> RGBColor {
+    const COLORS: [RGBColor; 6] = [
+        RGBColor(0, 191, 255),
+        RGBColor(255, 193, 7),
+        RGBColor(46, 204, 113),
+        RGBColor(231, 76, 60),
+        RGBColor(155, 89, 182),
+        RGBColor(52, 73, 94),
+    ];
+
+    COLORS[index % COLORS.len()]
 }
 
 fn setup_terminal() -> Result<Terminal<CrosstermBackend<std::io::Stdout>>, Box<dyn Error>> {
@@ -1369,6 +1465,53 @@ mod tests {
         assert_eq!(plot.series[0].name, "alpha");
         assert_eq!(plot.series[0].points.len(), 2);
         fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn saves_xy_plot_image() {
+        let input = temp_path("plot_image_xy.csv");
+        let output = temp_path("plot_image_xy.png");
+        write_file(&input, "t,x,v\n0,1,2\n1,3,4\n2,5,6\n").unwrap();
+
+        save_image_xy(
+            &input,
+            "t",
+            &[String::from("x"), String::from("v")],
+            &output,
+        )
+        .unwrap();
+
+        let metadata = fs::metadata(&output).unwrap();
+        assert!(metadata.len() > 0);
+
+        fs::remove_file(input).unwrap();
+        fs::remove_file(output).unwrap();
+    }
+
+    #[test]
+    fn saves_labeled_series_plot_image() {
+        let input = temp_path("plot_image_labels.csv");
+        let output = temp_path("nested/plot_image_labels.png");
+        write_file(
+            &input,
+            concat!(
+                "label,stamp,signal\n",
+                "alpha,2026-01-01T00:00:00Z,1.0\n",
+                "beta,2026-01-01T00:00:00Z,2.0\n",
+                "alpha,2026-01-01T00:00:01Z,1.5\n",
+                "beta,2026-01-01T00:00:01Z,2.5\n",
+            ),
+        )
+        .unwrap();
+
+        save_image_labeled_series(&input, "label", "stamp", "signal", &output).unwrap();
+
+        let metadata = fs::metadata(&output).unwrap();
+        assert!(metadata.len() > 0);
+
+        fs::remove_file(input).unwrap();
+        fs::remove_file(&output).unwrap();
+        fs::remove_dir_all(output.parent().unwrap()).unwrap();
     }
 
     #[test]

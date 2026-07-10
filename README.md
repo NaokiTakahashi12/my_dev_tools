@@ -113,6 +113,23 @@ cargo run -- csv_plot input.csv \
 - `y` / `Y`: Y方向だけズームイン / アウト
 - `0`: 表示範囲を全体表示にリセット
 
+## csv_plot_image
+
+`csv_plot` と同じ列指定で、線形プロットを画像ファイルとして保存します。出力先ディレクトリが存在しない場合は自動で作成します。
+
+```bash
+cargo run -- csv_plot_image input.csv \
+  --x-column stamp \
+  --y-columns signal,velocity \
+  --output plot.png
+
+cargo run -- csv_plot_image input.csv \
+  --label-column label \
+  --timestamp-column stamp \
+  --value-column signal \
+  --output labeled_plot.png
+```
+
 ## csv_power_spectrum
 
 指定した時系列 `x` 列と `y` 列から時間ごとの周波数強度を計算し、CLI 上でスペクトログラム風のヒートマップとして表示します。入力範囲全体を用いて等間隔に再サンプリングした後、時間窓ごとの FFT パワーを時間×周波数で可視化します。
