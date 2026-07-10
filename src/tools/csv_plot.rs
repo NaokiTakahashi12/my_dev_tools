@@ -12,7 +12,7 @@ use crossterm::terminal::{
 };
 use plotters::prelude::{
     BLACK, BitMapBackend, ChartBuilder, IntoDrawingArea, IntoFont, LineSeries, PathElement,
-    RGBColor, WHITE,
+    RGBColor, Rectangle, WHITE,
 };
 use plotters::style::Color as PlottersColor;
 use ratatui::backend::CrosstermBackend;
@@ -29,6 +29,7 @@ use super::csv_key_diff::{CsvData, read_csv};
 
 const HORIZONTAL_MARGIN: u16 = 12;
 const DEFAULT_IMAGE_SIZE: (u32, u32) = (1600, 900);
+const MAX_STATE_DEFINITIONS: usize = 3;
 const SERIES_COLORS: [Color; 6] = [
     Color::Cyan,
     Color::Yellow,
@@ -49,6 +50,7 @@ struct PlotData {
     x_bounds: [f64; 2],
     y_bounds: [f64; 2],
     derivative_y_bounds: [f64; 2],
+    state_bands: Option<StateBands>,
     allow_derivative_panel: bool,
     allow_fft_panel: bool,
 }
@@ -120,6 +122,22 @@ struct PlotSeries {
 }
 
 #[derive(Debug, Clone, PartialEq)]
+struct StateBands {
+    definitions: Vec<StateDefinition>,
+    points: Vec<(f64, u64)>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+struct StateDefinition {
+    bit: u64,
+    label: String,
+    color: StateColor,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct StateColor(u8, u8, u8);
+
+#[derive(Debug, Clone, PartialEq)]
 struct Viewport {
     x_bounds: [f64; 2],
     y_bounds: [f64; 2],
@@ -139,8 +157,19 @@ pub fn run_xy(
     x_column: &str,
     y_columns: &[String],
 ) -> Result<(), Box<dyn Error>> {
+    run_xy_with_state(input_path, x_column, y_columns, None, None)
+}
+
+pub fn run_xy_with_state(
+    input_path: &Path,
+    x_column: &str,
+    y_columns: &[String],
+    state_column: Option<&str>,
+    state_csv_path: Option<&Path>,
+) -> Result<(), Box<dyn Error>> {
     let csv = read_csv(input_path)?;
-    let plot = load_xy_plot_data(&csv, x_column, y_columns)?;
+    let state_config = state_config_from_args(state_column, state_csv_path)?;
+    let plot = load_xy_plot_data_with_state(&csv, x_column, y_columns, state_config)?;
     run_plot(plot)
 }
 
@@ -150,8 +179,33 @@ pub fn run_labeled_series(
     timestamp_column: &str,
     value_column: &str,
 ) -> Result<(), Box<dyn Error>> {
+    run_labeled_series_with_state(
+        input_path,
+        label_column,
+        timestamp_column,
+        value_column,
+        None,
+        None,
+    )
+}
+
+pub fn run_labeled_series_with_state(
+    input_path: &Path,
+    label_column: &str,
+    timestamp_column: &str,
+    value_column: &str,
+    state_column: Option<&str>,
+    state_csv_path: Option<&Path>,
+) -> Result<(), Box<dyn Error>> {
     let csv = read_csv(input_path)?;
-    let plot = load_labeled_series_plot_data(&csv, label_column, timestamp_column, value_column)?;
+    let state_config = state_config_from_args(state_column, state_csv_path)?;
+    let plot = load_labeled_series_plot_data_with_state(
+        &csv,
+        label_column,
+        timestamp_column,
+        value_column,
+        state_config,
+    )?;
     run_plot(plot)
 }
 
@@ -171,8 +225,20 @@ pub fn save_image_xy(
     y_columns: &[String],
     output_path: &Path,
 ) -> Result<(), Box<dyn Error>> {
+    save_image_xy_with_state(input_path, x_column, y_columns, None, None, output_path)
+}
+
+pub fn save_image_xy_with_state(
+    input_path: &Path,
+    x_column: &str,
+    y_columns: &[String],
+    state_column: Option<&str>,
+    state_csv_path: Option<&Path>,
+    output_path: &Path,
+) -> Result<(), Box<dyn Error>> {
     let csv = read_csv(input_path)?;
-    let plot = load_xy_plot_data(&csv, x_column, y_columns)?;
+    let state_config = state_config_from_args(state_column, state_csv_path)?;
+    let plot = load_xy_plot_data_with_state(&csv, x_column, y_columns, state_config)?;
     save_line_plot_image(&plot, output_path)
 }
 
@@ -183,8 +249,35 @@ pub fn save_image_labeled_series(
     value_column: &str,
     output_path: &Path,
 ) -> Result<(), Box<dyn Error>> {
+    save_image_labeled_series_with_state(
+        input_path,
+        label_column,
+        timestamp_column,
+        value_column,
+        None,
+        None,
+        output_path,
+    )
+}
+
+pub fn save_image_labeled_series_with_state(
+    input_path: &Path,
+    label_column: &str,
+    timestamp_column: &str,
+    value_column: &str,
+    state_column: Option<&str>,
+    state_csv_path: Option<&Path>,
+    output_path: &Path,
+) -> Result<(), Box<dyn Error>> {
     let csv = read_csv(input_path)?;
-    let plot = load_labeled_series_plot_data(&csv, label_column, timestamp_column, value_column)?;
+    let state_config = state_config_from_args(state_column, state_csv_path)?;
+    let plot = load_labeled_series_plot_data_with_state(
+        &csv,
+        label_column,
+        timestamp_column,
+        value_column,
+        state_config,
+    )?;
     save_line_plot_image(&plot, output_path)
 }
 
@@ -200,10 +293,31 @@ fn run_plot(plot: PlotData) -> Result<(), Box<dyn Error>> {
     }
 }
 
+fn state_config_from_args<'a>(
+    state_column: Option<&'a str>,
+    state_csv_path: Option<&'a Path>,
+) -> Result<Option<(&'a str, &'a Path)>, Box<dyn Error>> {
+    match (state_column, state_csv_path) {
+        (Some(column), Some(path)) => Ok(Some((column, path))),
+        (None, None) => Ok(None),
+        _ => Err(String::from("--state-column and --state-csv must be specified together").into()),
+    }
+}
+
+#[cfg(test)]
 fn load_xy_plot_data(
     csv: &CsvData,
     x_column: &str,
     y_columns: &[String],
+) -> Result<PlotData, Box<dyn Error>> {
+    load_xy_plot_data_with_state(csv, x_column, y_columns, None)
+}
+
+fn load_xy_plot_data_with_state(
+    csv: &CsvData,
+    x_column: &str,
+    y_columns: &[String],
+    state_config: Option<(&str, &Path)>,
 ) -> Result<PlotData, Box<dyn Error>> {
     let x_index = find_column_index(&csv.headers, x_column)?;
     if y_columns.is_empty() {
@@ -235,7 +349,7 @@ fn load_xy_plot_data(
         }
     }
 
-    build_plot_data(
+    let mut plot = build_plot_data(
         PlotConfig {
             kind: PlotKind::Line,
             x_axis: AxisDescriptor {
@@ -250,14 +364,33 @@ fn load_xy_plot_data(
         series,
         x_values,
         y_values,
-    )
+    )?;
+    plot.state_bands = load_state_bands(csv, x_index, x_column, &AxisKind::Numeric, state_config)?;
+    Ok(plot)
 }
 
+#[cfg(test)]
 fn load_labeled_series_plot_data(
     csv: &CsvData,
     label_column: &str,
     timestamp_column: &str,
     value_column: &str,
+) -> Result<PlotData, Box<dyn Error>> {
+    load_labeled_series_plot_data_with_state(
+        csv,
+        label_column,
+        timestamp_column,
+        value_column,
+        None,
+    )
+}
+
+fn load_labeled_series_plot_data_with_state(
+    csv: &CsvData,
+    label_column: &str,
+    timestamp_column: &str,
+    value_column: &str,
+    state_config: Option<(&str, &Path)>,
 ) -> Result<PlotData, Box<dyn Error>> {
     let label_index = find_column_index(&csv.headers, label_column)?;
     let timestamp_index = find_column_index(&csv.headers, timestamp_column)?;
@@ -300,7 +433,7 @@ fn load_labeled_series_plot_data(
         .collect::<Vec<_>>();
     series.sort_by(|left, right| left.name.cmp(&right.name));
 
-    build_plot_data(
+    let mut plot = build_plot_data(
         PlotConfig {
             kind: PlotKind::Line,
             x_axis: AxisDescriptor {
@@ -315,7 +448,15 @@ fn load_labeled_series_plot_data(
         series,
         x_values,
         y_values,
-    )
+    )?;
+    plot.state_bands = load_state_bands(
+        csv,
+        timestamp_index,
+        timestamp_column,
+        &AxisKind::Timestamp,
+        state_config,
+    )?;
+    Ok(plot)
 }
 
 fn load_power_spectrum_plot_data(
@@ -359,6 +500,7 @@ fn load_power_spectrum_plot_data(
         x_bounds,
         y_bounds,
         derivative_y_bounds: [0.0, 1.0],
+        state_bands: None,
         allow_derivative_panel: false,
         allow_fft_panel: false,
     })
@@ -401,9 +543,179 @@ fn build_plot_data(
         x_bounds: axis_bounds(x_values.into_iter()),
         y_bounds: axis_bounds(y_values.into_iter()),
         derivative_y_bounds: axis_bounds_or_default(derivative_y_values.into_iter(), [-1.0, 1.0]),
+        state_bands: None,
         allow_derivative_panel: config.allow_derivative_panel,
         allow_fft_panel: config.allow_fft_panel,
     })
+}
+
+fn load_state_bands(
+    data_csv: &CsvData,
+    x_index: usize,
+    x_column: &str,
+    axis_kind: &AxisKind,
+    state_config: Option<(&str, &Path)>,
+) -> Result<Option<StateBands>, Box<dyn Error>> {
+    let Some((state_column, definitions_path)) = state_config else {
+        return Ok(None);
+    };
+    let state_index = find_column_index(&data_csv.headers, state_column)?;
+    let definitions = load_state_definitions(definitions_path)?;
+    let known_bits = definitions
+        .iter()
+        .fold(0_u64, |combined, definition| combined | definition.bit);
+    let mut points = Vec::with_capacity(data_csv.rows.len());
+
+    for (row_index, row) in data_csv.rows.iter().enumerate() {
+        let x = match axis_kind {
+            AxisKind::Numeric => parse_f64_cell(row, x_index, x_column, row_index)?,
+            AxisKind::Timestamp => parse_timestamp_cell(row, x_index, x_column, row_index)?,
+        };
+        let mask = parse_state_mask(row, state_index, state_column, row_index)?;
+        if mask & !known_bits != 0 {
+            return Err(format!(
+                "row {} column {state_column} contains bits missing from the state CSV",
+                row_index + 1
+            )
+            .into());
+        }
+        points.push((x, mask));
+    }
+
+    points.sort_by(|left, right| left.0.total_cmp(&right.0));
+    let points = points
+        .into_iter()
+        .fold(Vec::new(), |mut merged, (x, mask)| {
+            if let Some((previous_x, previous_mask)) = merged.last_mut()
+                && *previous_x == x
+            {
+                *previous_mask |= mask;
+            } else {
+                merged.push((x, mask));
+            }
+            merged
+        });
+
+    Ok(Some(StateBands {
+        definitions,
+        points,
+    }))
+}
+
+fn load_state_definitions(path: &Path) -> Result<Vec<StateDefinition>, Box<dyn Error>> {
+    let csv = read_csv(path)?;
+    let bit_index = find_column_index(&csv.headers, "bit")?;
+    let label_index = find_column_index(&csv.headers, "label")?;
+    let color_index = csv.headers.iter().position(|header| header == "color");
+
+    if csv.rows.is_empty() {
+        return Err(String::from("state CSV requires at least one state definition").into());
+    }
+    if csv.rows.len() > MAX_STATE_DEFINITIONS {
+        return Err(format!(
+            "state CSV supports at most {MAX_STATE_DEFINITIONS} state definitions"
+        )
+        .into());
+    }
+
+    let mut bits = std::collections::HashSet::new();
+    csv.rows
+        .iter()
+        .enumerate()
+        .map(|(row_index, row)| {
+            let bit_text = state_cell(row, bit_index, "bit", row_index)?;
+            let bit = parse_bit(bit_text, row_index)?;
+            if !bits.insert(bit) {
+                return Err(format!("duplicate state bit: {bit}").into());
+            }
+
+            let label = state_cell(row, label_index, "label", row_index)?.trim();
+            if label.is_empty() {
+                return Err(format!("row {} column label must not be empty", row_index + 1).into());
+            }
+            let color = color_index
+                .map(|index| state_cell(row, index, "color", row_index))
+                .transpose()?
+                .filter(|color| !color.trim().is_empty())
+                .map(parse_state_color)
+                .transpose()?
+                .unwrap_or_else(|| auto_state_color(row_index));
+            Ok(StateDefinition {
+                bit,
+                label: label.to_string(),
+                color,
+            })
+        })
+        .collect()
+}
+
+fn state_cell<'a>(
+    row: &'a [String],
+    index: usize,
+    column: &str,
+    row_index: usize,
+) -> Result<&'a str, Box<dyn Error>> {
+    row.get(index)
+        .map(String::as_str)
+        .ok_or_else(|| format!("row {} is missing column value: {column}", row_index + 1).into())
+}
+
+fn parse_bit(value: &str, row_index: usize) -> Result<u64, Box<dyn Error>> {
+    let value = value.trim();
+    let bit = value
+        .strip_prefix("0x")
+        .or_else(|| value.strip_prefix("0X"))
+        .map(|hex| u64::from_str_radix(hex, 16))
+        .unwrap_or_else(|| value.parse())
+        .map_err(|error| format!("failed to parse row {} column bit: {error}", row_index + 1))?;
+    if bit == 0 || !bit.is_power_of_two() {
+        return Err(format!("row {} column bit must contain one bit", row_index + 1).into());
+    }
+    Ok(bit)
+}
+
+fn parse_state_mask(
+    row: &[String],
+    index: usize,
+    column: &str,
+    row_index: usize,
+) -> Result<u64, Box<dyn Error>> {
+    let value = state_cell(row, index, column, row_index)?.trim();
+    value
+        .strip_prefix("0x")
+        .or_else(|| value.strip_prefix("0X"))
+        .map(|hex| u64::from_str_radix(hex, 16))
+        .unwrap_or_else(|| value.parse())
+        .map_err(|error| {
+            format!(
+                "failed to parse row {} column {column} as state mask: {error}",
+                row_index + 1
+            )
+            .into()
+        })
+}
+
+fn parse_state_color(value: &str) -> Result<StateColor, Box<dyn Error>> {
+    let value = value.trim().trim_start_matches('#');
+    if value.is_empty() {
+        return Err(String::from("state color must not be empty").into());
+    }
+    if value.len() != 6 {
+        return Err(format!("state color must be #RRGGBB: {value}").into());
+    }
+    let red = u8::from_str_radix(&value[0..2], 16)?;
+    let green = u8::from_str_radix(&value[2..4], 16)?;
+    let blue = u8::from_str_radix(&value[4..6], 16)?;
+    Ok(StateColor(red, green, blue))
+}
+
+fn auto_state_color(index: usize) -> StateColor {
+    const COLORS: [StateColor; MAX_STATE_DEFINITIONS] = [
+        StateColor(225, 87, 89),
+        StateColor(80, 170, 220),
+        StateColor(244, 180, 0),
+    ];
+    COLORS[index]
 }
 
 fn save_line_plot_image(plot: &PlotData, output_path: &Path) -> Result<(), Box<dyn Error>> {
@@ -419,8 +731,14 @@ fn save_line_plot_image(plot: &PlotData, output_path: &Path) -> Result<(), Box<d
 
     let root = BitMapBackend::new(output_path, DEFAULT_IMAGE_SIZE).into_drawing_area();
     root.fill(&WHITE)?;
+    let (chart_area, state_area) = if plot.state_bands.is_some() {
+        let (chart_area, state_area) = root.split_vertically(DEFAULT_IMAGE_SIZE.1 - 180);
+        (chart_area, Some(state_area))
+    } else {
+        (root.clone(), None)
+    };
 
-    let mut chart = ChartBuilder::on(&root)
+    let mut chart = ChartBuilder::on(&chart_area)
         .margin(24)
         .caption(plot.title.clone(), ("sans-serif", 32).into_font())
         .x_label_area_size(56)
@@ -454,6 +772,55 @@ fn save_line_plot_image(plot: &PlotData, output_path: &Path) -> Result<(), Box<d
         .border_style(BLACK)
         .background_style(WHITE.mix(0.85))
         .draw()?;
+
+    if let (Some(state_bands), Some(state_area)) = (&plot.state_bands, state_area) {
+        let labels = state_bands
+            .definitions
+            .iter()
+            .map(|definition| definition.label.as_str())
+            .collect::<Vec<_>>()
+            .join(" | ");
+        let lane_count = state_bands.definitions.len();
+        let mut state_chart = ChartBuilder::on(&state_area)
+            .margin(16)
+            .caption(
+                format!("states (top to bottom): {labels}"),
+                ("sans-serif", 20).into_font(),
+            )
+            .x_label_area_size(40)
+            .y_label_area_size(1)
+            .build_cartesian_2d(plot.x_bounds[0]..plot.x_bounds[1], 0.0..lane_count as f64)?;
+        state_chart
+            .configure_mesh()
+            .disable_y_mesh()
+            .disable_x_mesh()
+            .y_labels(0)
+            .x_label_formatter(&|value| format_axis_value(*value, &plot.x_axis.kind))
+            .draw()?;
+
+        for (index, definition) in state_bands.definitions.iter().enumerate() {
+            let lane_start = (lane_count - index - 1) as f64;
+            let color = RGBColor(definition.color.0, definition.color.1, definition.color.2);
+            for (point_index, (start, mask)) in state_bands.points.iter().enumerate() {
+                if mask & definition.bit == 0 {
+                    continue;
+                }
+                let end = state_bands
+                    .points
+                    .get(point_index + 1)
+                    .map(|(x, _)| *x)
+                    .unwrap_or(plot.x_bounds[1]);
+                let start = (*start).max(plot.x_bounds[0]);
+                let end = end.min(plot.x_bounds[1]);
+                if end > start {
+                    state_chart.draw_series(std::iter::once(Rectangle::new(
+                        [(start, lane_start), (end, lane_start + 1.0)],
+                        color.filled(),
+                    )))?;
+                }
+            }
+        }
+    }
 
     root.present()?;
     Ok(())
@@ -537,16 +904,29 @@ fn draw_plot(
             let area = frame.area();
             let [content_area, help_area] =
                 Layout::vertical([Constraint::Min(1), Constraint::Length(1)]).areas(area);
+            let state_height = plot
+                .state_bands
+                .as_ref()
+                .map(|bands| bands.definitions.len() as u16 + 2)
+                .unwrap_or(0);
+            let (plot_content_area, state_area) = if state_height == 0 {
+                (content_area, None)
+            } else {
+                let [plot_area, state_area] =
+                    Layout::vertical([Constraint::Min(1), Constraint::Length(state_height)])
+                        .areas(content_area);
+                (plot_area, Some(state_area))
+            };
 
             let areas = match (show_derivative, show_fft) {
                 (false, false) => {
-                    let [main] = Layout::vertical([Constraint::Min(1)]).areas(content_area);
+                    let [main] = Layout::vertical([Constraint::Min(1)]).areas(plot_content_area);
                     vec![main]
                 }
                 (true, false) | (false, true) => {
                     let [main, secondary] =
                         Layout::vertical([Constraint::Percentage(50), Constraint::Percentage(50)])
-                            .areas(content_area);
+                            .areas(plot_content_area);
                     vec![main, secondary]
                 }
                 (true, true) => {
@@ -555,7 +935,7 @@ fn draw_plot(
                         Constraint::Percentage(33),
                         Constraint::Percentage(33),
                     ])
-                    .areas(content_area);
+                    .areas(plot_content_area);
                     vec![main, secondary, tertiary]
                 }
             };
@@ -622,6 +1002,9 @@ fn draw_plot(
                         y_bounds: state.fft_y_bounds,
                     },
                 );
+            }
+            if let (Some(state_bands), Some(state_area)) = (&plot.state_bands, state_area) {
+                render_state_bands(frame, state_area, state_bands, state.main_viewport.x_bounds);
             }
             frame.render_widget(help, help_area);
         })?;
@@ -730,6 +1113,68 @@ fn draw_plot(
             _ => {}
         }
     }
+}
+
+fn render_state_bands(
+    frame: &mut Frame,
+    area: ratatui::layout::Rect,
+    state_bands: &StateBands,
+    x_bounds: [f64; 2],
+) {
+    let block = Block::default().title("states").borders(Borders::ALL);
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+    if inner.width < 2 || inner.height == 0 {
+        return;
+    }
+
+    let label_width = inner.width.min(20);
+    let [labels_area, bands_area] =
+        Layout::horizontal([Constraint::Length(label_width), Constraint::Min(1)]).areas(inner);
+    let labels = state_bands
+        .definitions
+        .iter()
+        .map(|definition| Line::from(definition.label.clone()))
+        .collect::<Vec<_>>();
+    frame.render_widget(Paragraph::new(labels), labels_area);
+
+    let width = usize::from(bands_area.width);
+    let rows = state_bands
+        .definitions
+        .iter()
+        .map(|definition| {
+            Line::from(
+                (0..width)
+                    .map(|column| {
+                        let ratio = (column as f64 + 0.5) / width.max(1) as f64;
+                        let x = x_bounds[0] + (x_bounds[1] - x_bounds[0]) * ratio;
+                        let active = state_mask_at(state_bands, x) & definition.bit != 0;
+                        let style = if active {
+                            Style::default().bg(state_color_for_terminal(definition.color))
+                        } else {
+                            Style::default()
+                        };
+                        Span::styled(" ", style)
+                    })
+                    .collect::<Vec<_>>(),
+            )
+        })
+        .collect::<Vec<_>>();
+    frame.render_widget(Paragraph::new(rows), bands_area);
+}
+
+fn state_mask_at(state_bands: &StateBands, x: f64) -> u64 {
+    state_bands
+        .points
+        .partition_point(|(point_x, _)| *point_x <= x)
+        .checked_sub(1)
+        .and_then(|index| state_bands.points.get(index))
+        .map(|(_, mask)| *mask)
+        .unwrap_or(0)
+}
+
+fn state_color_for_terminal(color: StateColor) -> Color {
+    Color::Rgb(color.0, color.1, color.2)
 }
 
 fn render_chart(frame: &mut Frame, area: ratatui::layout::Rect, view: ChartView<'_>) {
@@ -1011,6 +1456,7 @@ fn compute_fft_plot_data(series: &[PlotSeries], x_bounds: [f64; 2]) -> PlotData 
         x_bounds: axis_bounds_or_default(x_values.into_iter(), [0.0, 1.0]),
         y_bounds: axis_bounds_or_default(y_values.into_iter(), [0.0, 1.0]),
         derivative_y_bounds: [0.0, 1.0],
+        state_bands: None,
         allow_derivative_panel: false,
         allow_fft_panel: false,
     }
@@ -1560,6 +2006,81 @@ mod tests {
     }
 
     #[test]
+    fn loads_state_bands_with_automatic_and_explicit_colors() {
+        let input = temp_path("plot_states.csv");
+        let definitions = temp_path("plot_states_definition.csv");
+        write_file(&input, "t,signal,state\n0,1,0\n1,2,5\n2,3,4\n").unwrap();
+        write_file(&definitions, "bit,label,color\n1,spike,\n4,step,#00ff00\n").unwrap();
+
+        let plot = load_xy_plot_data_with_state(
+            &read_csv(&input).unwrap(),
+            "t",
+            &[String::from("signal")],
+            Some(("state", &definitions)),
+        )
+        .unwrap();
+        let state_bands = plot.state_bands.unwrap();
+
+        assert_eq!(state_bands.definitions.len(), 2);
+        assert_eq!(state_bands.definitions[0].color, auto_state_color(0));
+        assert_eq!(state_bands.definitions[1].color, StateColor(0, 255, 0));
+        assert_eq!(state_mask_at(&state_bands, 1.5), 5);
+        assert_eq!(state_mask_at(&state_bands, 2.0), 4);
+
+        fs::remove_file(input).unwrap();
+        fs::remove_file(definitions).unwrap();
+    }
+
+    #[test]
+    fn saves_plot_image_with_state_bands() {
+        let input = temp_path("plot_image_states.csv");
+        let definitions = temp_path("plot_image_states_definition.csv");
+        let output = temp_path("plot_image_states.png");
+        write_file(&input, "t,signal,state\n0,1,0\n1,2,1\n2,3,3\n").unwrap();
+        write_file(&definitions, "bit,label\n1,spike\n2,step\n").unwrap();
+
+        save_image_xy_with_state(
+            &input,
+            "t",
+            &[String::from("signal")],
+            Some("state"),
+            Some(&definitions),
+            &output,
+        )
+        .unwrap();
+
+        assert!(fs::metadata(&output).unwrap().len() > 0);
+
+        fs::remove_file(input).unwrap();
+        fs::remove_file(definitions).unwrap();
+        fs::remove_file(output).unwrap();
+    }
+
+    #[test]
+    fn rejects_state_bits_missing_from_definition_csv() {
+        let input = temp_path("plot_unknown_state.csv");
+        let definitions = temp_path("plot_unknown_state_definition.csv");
+        write_file(&input, "t,signal,state\n0,1,2\n1,2,2\n").unwrap();
+        write_file(&definitions, "bit,label\n1,spike\n").unwrap();
+
+        let error = load_xy_plot_data_with_state(
+            &read_csv(&input).unwrap(),
+            "t",
+            &[String::from("signal")],
+            Some(("state", &definitions)),
+        )
+        .unwrap_err();
+
+        assert!(
+            error
+                .to_string()
+                .contains("bits missing from the state CSV")
+        );
+        fs::remove_file(input).unwrap();
+        fs::remove_file(definitions).unwrap();
+    }
+
+    #[test]
     fn computes_fft_peak_for_sine_wave() {
         let sample_spacing = 0.1;
         let frequency = 10.0 / (128.0 * sample_spacing);
@@ -1610,6 +2131,17 @@ mod tests {
         let samples = resample_uniform(&[(0.0, 1.0), (1.0, 1.0)], -1.0, 1.0, 4);
 
         assert_eq!(samples, vec![0.0, 1.0, 1.0, 0.0]);
+    }
+
+    #[test]
+    fn rejects_incomplete_state_configuration() {
+        let error = state_config_from_args(Some("state"), None).unwrap_err();
+
+        assert!(
+            error
+                .to_string()
+                .contains("--state-column and --state-csv must be specified together")
+        );
     }
 
     #[test]

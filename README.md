@@ -95,6 +95,23 @@ cargo run -- csv_plot input.csv \
   --value-column signal
 ```
 
+状態を表すビットマスク列を `--state-column`、状態定義CSVを `--state-csv` で追加指定すると、プロット下部に状態ごとの色付き帯を表示します。状態定義CSVは `bit` と `label` が必須で、任意の `color` は `#RRGGBB` 形式です。`color` 列またはその値を省略した状態は自動配色されます。現在は最大3状態まで指定できます。複数ビットが同時に立つ場合は、それぞれの状態帯に同時表示されます。
+
+```csv
+bit,label,color
+1,positive_spike,#e15759
+2,negative_spike,#4fa8dc
+4,positive_step,
+```
+
+```bash
+cargo run -- csv_plot input.csv \
+  --x-column stamp \
+  --y-columns signal \
+  --state-column anomaly_mask \
+  --state-csv states.csv
+```
+
 `--x-column` / `--y-columns` を指定した場合は従来通り数値列をそのままプロットします。
 
 `--label-column` / `--timestamp-column` / `--value-column` を指定した場合は、ラベルごとに系列を自動で分割して時系列プロットします。タイムスタンプ列は Unix 秒、RFC3339、または UTC とみなせる `YYYY-MM-DD HH:MM:SS[.fraction]` / `YYYY/MM/DD HH:MM:SS[.fraction]` / `...T...` 形式を受け付けます。
@@ -128,6 +145,17 @@ cargo run -- csv_plot_image input.csv \
   --timestamp-column stamp \
   --value-column signal \
   --output labeled_plot.png
+```
+
+状態帯は `csv_plot` と同じ `--state-column` / `--state-csv` 指定で画像にも含められます。
+
+```bash
+cargo run -- csv_plot_image input.csv \
+  --x-column stamp \
+  --y-columns signal \
+  --state-column anomaly_mask \
+  --state-csv states.csv \
+  --output plot.png
 ```
 
 ## csv_power_spectrum

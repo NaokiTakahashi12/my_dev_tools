@@ -61,12 +61,20 @@ enum CsvPlotCommand {
     XY {
         x_column: String,
         y_columns: Vec<String>,
+        state: Option<StateOverlayCommand>,
     },
     LabeledSeries {
         label_column: String,
         timestamp_column: String,
         value_column: String,
+        state: Option<StateOverlayCommand>,
     },
+}
+
+#[derive(Debug, PartialEq)]
+struct StateOverlayCommand {
+    column: String,
+    definitions: PathBuf,
 }
 
 pub fn run() -> Result<i32, Box<dyn Error>> {
@@ -481,6 +489,8 @@ fn parse_csv_plot_args(
     let mut label_column = None;
     let mut timestamp_column = None;
     let mut value_column = None;
+    let mut state_column = None;
+    let mut state_csv = None;
     let mut output = None;
     let mut index = 1;
 
@@ -521,6 +531,20 @@ fn parse_csv_plot_args(
                 value_column = Some(value.to_string());
                 index += 2;
             }
+            Some("--state-column") => {
+                let Some(value) = args.get(index + 1).and_then(|arg| arg.to_str()) else {
+                    return Err(String::from("missing value after --state-column").into());
+                };
+                state_column = Some(value.to_string());
+                index += 2;
+            }
+            Some("--state-csv") => {
+                let Some(value) = args.get(index + 1) else {
+                    return Err(String::from("missing value after --state-csv").into());
+                };
+                state_csv = Some(PathBuf::from(value));
+                index += 2;
+            }
             Some("--output") if require_output => {
                 let Some(value) = args.get(index + 1) else {
                     return Err(String::from("missing value after --output").into());
@@ -540,6 +564,25 @@ fn parse_csv_plot_args(
         }
     }
 
+    let state = match (state_column, state_csv) {
+        (Some(column), Some(definitions)) => Some(StateOverlayCommand {
+            column,
+            definitions,
+        }),
+        (None, None) => None,
+        _ => {
+            let command_name = if require_output {
+                "csv_plot_image"
+            } else {
+                "csv_plot"
+            };
+            return Err(format!(
+                "{command_name} requires --state-column NAME and --state-csv PATH together"
+            )
+            .into());
+        }
+    };
+
     let mode = if let Some(x_column) = x_column {
         if !y_columns.is_empty()
             && label_column.is_none()
@@ -549,6 +592,7 @@ fn parse_csv_plot_args(
             CsvPlotCommand::XY {
                 x_column,
                 y_columns,
+                state,
             }
         } else {
             let command_name = if require_output {
@@ -569,6 +613,7 @@ fn parse_csv_plot_args(
                     label_column,
                     timestamp_column,
                     value_column,
+                    state,
                 }
             }
             _ => {
@@ -653,15 +698,30 @@ fn run_csv_plot(input: &Path, mode: &CsvPlotCommand) -> Result<i32, Box<dyn Erro
         CsvPlotCommand::XY {
             x_column,
             y_columns,
+            state,
         } => {
-            csv_plot::run_xy(input, x_column, y_columns)?;
+            csv_plot::run_xy_with_state(
+                input,
+                x_column,
+                y_columns,
+                state.as_ref().map(|state| state.column.as_str()),
+                state.as_ref().map(|state| state.definitions.as_path()),
+            )?;
         }
         CsvPlotCommand::LabeledSeries {
             label_column,
             timestamp_column,
             value_column,
+            state,
         } => {
-            csv_plot::run_labeled_series(input, label_column, timestamp_column, value_column)?;
+            csv_plot::run_labeled_series_with_state(
+                input,
+                label_column,
+                timestamp_column,
+                value_column,
+                state.as_ref().map(|state| state.column.as_str()),
+                state.as_ref().map(|state| state.definitions.as_path()),
+            )?;
         }
     }
     Ok(0)
@@ -676,16 +736,27 @@ fn run_csv_plot_image(
         CsvPlotCommand::XY {
             x_column,
             y_columns,
-        } => csv_plot::save_image_xy(input, x_column, y_columns, output),
+            state,
+        } => csv_plot::save_image_xy_with_state(
+            input,
+            x_column,
+            y_columns,
+            state.as_ref().map(|state| state.column.as_str()),
+            state.as_ref().map(|state| state.definitions.as_path()),
+            output,
+        ),
         CsvPlotCommand::LabeledSeries {
             label_column,
             timestamp_column,
             value_column,
-        } => csv_plot::save_image_labeled_series(
+            state,
+        } => csv_plot::save_image_labeled_series_with_state(
             input,
             label_column,
             timestamp_column,
             value_column,
+            state.as_ref().map(|state| state.column.as_str()),
+            state.as_ref().map(|state| state.definitions.as_path()),
             output,
         ),
     }
@@ -700,10 +771,10 @@ fn usage() -> &'static str {
         "  my_dev_tools csv_label_split INPUT --label-column NAME [--output-dir PATH]\n",
         "  my_dev_tools csv_power_spectrum INPUT --x-column NAME --y-column NAME\n",
         "  my_dev_tools csv_pseudo_diff INPUT --time-column NAME --value-column NAME --time-scale VALUE [--output PATH]\n",
-        "  my_dev_tools csv_plot INPUT --x-column NAME --y-columns NAME[,NAME...]\n",
-        "  my_dev_tools csv_plot INPUT --label-column NAME --timestamp-column NAME --value-column NAME\n",
-        "  my_dev_tools csv_plot_image INPUT --x-column NAME --y-columns NAME[,NAME...] --output PATH\n",
-        "  my_dev_tools csv_plot_image INPUT --label-column NAME --timestamp-column NAME --value-column NAME --output PATH\n"
+        "  my_dev_tools csv_plot INPUT --x-column NAME --y-columns NAME[,NAME...] [--state-column NAME --state-csv PATH]\n",
+        "  my_dev_tools csv_plot INPUT --label-column NAME --timestamp-column NAME --value-column NAME [--state-column NAME --state-csv PATH]\n",
+        "  my_dev_tools csv_plot_image INPUT --x-column NAME --y-columns NAME[,NAME...] --output PATH [--state-column NAME --state-csv PATH]\n",
+        "  my_dev_tools csv_plot_image INPUT --label-column NAME --timestamp-column NAME --value-column NAME --output PATH [--state-column NAME --state-csv PATH]\n"
     )
 }
 
@@ -855,6 +926,7 @@ mod tests {
                 mode: CsvPlotCommand::XY {
                     x_column: String::from("stamp"),
                     y_columns: vec![String::from("signal"), String::from("velocity")],
+                    state: None,
                 },
             }
         );
@@ -881,6 +953,7 @@ mod tests {
                 mode: CsvPlotCommand::XY {
                     x_column: String::from("stamp"),
                     y_columns: vec![String::from("signal"), String::from("velocity")],
+                    state: None,
                 },
             }
         );
@@ -908,6 +981,7 @@ mod tests {
                     label_column: String::from("label"),
                     timestamp_column: String::from("stamp"),
                     value_column: String::from("signal"),
+                    state: None,
                 },
             }
         );
@@ -956,6 +1030,7 @@ mod tests {
                 mode: CsvPlotCommand::XY {
                     x_column: String::from("stamp"),
                     y_columns: vec![String::from("signal"), String::from("velocity")],
+                    state: None,
                 },
                 output: PathBuf::from("plot.png"),
             }
@@ -986,9 +1061,63 @@ mod tests {
                     label_column: String::from("label"),
                     timestamp_column: String::from("stamp"),
                     value_column: String::from("signal"),
+                    state: None,
                 },
                 output: PathBuf::from("plot.png"),
             }
+        );
+    }
+
+    #[test]
+    fn parses_csv_plot_state_overlay() {
+        let command = parse_args(os_args(&[
+            "csv_plot",
+            "input.csv",
+            "--x-column",
+            "stamp",
+            "--y-columns",
+            "signal",
+            "--state-column",
+            "anomaly_mask",
+            "--state-csv",
+            "states.csv",
+        ]))
+        .unwrap();
+
+        assert_eq!(
+            command,
+            Command::Plot {
+                input: PathBuf::from("input.csv"),
+                mode: CsvPlotCommand::XY {
+                    x_column: String::from("stamp"),
+                    y_columns: vec![String::from("signal")],
+                    state: Some(StateOverlayCommand {
+                        column: String::from("anomaly_mask"),
+                        definitions: PathBuf::from("states.csv"),
+                    }),
+                },
+            }
+        );
+    }
+
+    #[test]
+    fn rejects_incomplete_state_overlay_arguments() {
+        let error = parse_args(os_args(&[
+            "csv_plot",
+            "input.csv",
+            "--x-column",
+            "stamp",
+            "--y-columns",
+            "signal",
+            "--state-column",
+            "anomaly_mask",
+        ]))
+        .unwrap_err();
+
+        assert!(
+            error
+                .to_string()
+                .contains("--state-column NAME and --state-csv PATH together")
         );
     }
 }
