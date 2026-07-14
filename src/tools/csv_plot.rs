@@ -124,6 +124,12 @@ struct PlotSeries {
 #[derive(Debug, Clone, PartialEq)]
 struct StateBands {
     definitions: Vec<StateDefinition>,
+    tracks: Vec<StateTrack>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+struct StateTrack {
+    label: Option<String>,
     points: Vec<(f64, u64)>,
 }
 
@@ -365,7 +371,14 @@ fn load_xy_plot_data_with_state(
         x_values,
         y_values,
     )?;
-    plot.state_bands = load_state_bands(csv, x_index, x_column, &AxisKind::Numeric, state_config)?;
+    plot.state_bands = load_state_bands(
+        csv,
+        x_index,
+        x_column,
+        &AxisKind::Numeric,
+        None,
+        state_config,
+    )?;
     Ok(plot)
 }
 
@@ -454,6 +467,7 @@ fn load_labeled_series_plot_data_with_state(
         timestamp_index,
         timestamp_column,
         &AxisKind::Timestamp,
+        Some((label_index, label_column)),
         state_config,
     )?;
     Ok(plot)
@@ -554,6 +568,7 @@ fn load_state_bands(
     x_index: usize,
     x_column: &str,
     axis_kind: &AxisKind,
+    label_config: Option<(usize, &str)>,
     state_config: Option<(&str, &Path)>,
 ) -> Result<Option<StateBands>, Box<dyn Error>> {
     let Some((state_column, definitions_path)) = state_config else {
@@ -564,7 +579,7 @@ fn load_state_bands(
     let known_bits = definitions
         .iter()
         .fold(0_u64, |combined, definition| combined | definition.bit);
-    let mut points = Vec::with_capacity(data_csv.rows.len());
+    let mut points_by_track = BTreeMap::<Option<String>, Vec<(f64, u64)>>::new();
 
     for (row_index, row) in data_csv.rows.iter().enumerate() {
         let x = match axis_kind {
@@ -579,27 +594,55 @@ fn load_state_bands(
             )
             .into());
         }
-        points.push((x, mask));
+        let label = label_config
+            .map(|(index, column)| -> Result<String, Box<dyn Error>> {
+                let label = state_cell(row, index, column, row_index)?.trim();
+                if label.is_empty() {
+                    return Err(
+                        format!("row {} column {column} must not be empty", row_index + 1).into(),
+                    );
+                }
+                Ok(label.to_string())
+            })
+            .transpose()?;
+        points_by_track.entry(label).or_default().push((x, mask));
     }
 
+    Ok(Some(StateBands {
+        definitions,
+        tracks: points_by_track
+            .into_iter()
+            .map(|(label, points)| StateTrack {
+                points: merge_state_points(points, label.as_deref(), axis_kind),
+                label,
+            })
+            .collect(),
+    }))
+}
+
+fn merge_state_points(
+    mut points: Vec<(f64, u64)>,
+    label: Option<&str>,
+    axis_kind: &AxisKind,
+) -> Vec<(f64, u64)> {
     points.sort_by(|left, right| left.0.total_cmp(&right.0));
-    let points = points
+    points
         .into_iter()
         .fold(Vec::new(), |mut merged, (x, mask)| {
             if let Some((previous_x, previous_mask)) = merged.last_mut()
                 && *previous_x == x
             {
+                eprintln!(
+                    "warning: combined state masks for {} at {}",
+                    label.unwrap_or("the unlabeled series"),
+                    format_axis_value(x, axis_kind)
+                );
                 *previous_mask |= mask;
             } else {
                 merged.push((x, mask));
             }
             merged
-        });
-
-    Ok(Some(StateBands {
-        definitions,
-        points,
-    }))
+        })
 }
 
 fn load_state_definitions(path: &Path) -> Result<Vec<StateDefinition>, Box<dyn Error>> {
@@ -661,13 +704,7 @@ fn state_cell<'a>(
 }
 
 fn parse_bit(value: &str, row_index: usize) -> Result<u64, Box<dyn Error>> {
-    let value = value.trim();
-    let bit = value
-        .strip_prefix("0x")
-        .or_else(|| value.strip_prefix("0X"))
-        .map(|hex| u64::from_str_radix(hex, 16))
-        .unwrap_or_else(|| value.parse())
-        .map_err(|error| format!("failed to parse row {} column bit: {error}", row_index + 1))?;
+    let bit = parse_u64_value(value, row_index, "bit")?;
     if bit == 0 || !bit.is_power_of_two() {
         return Err(format!("row {} column bit must contain one bit", row_index + 1).into());
     }
@@ -681,6 +718,11 @@ fn parse_state_mask(
     row_index: usize,
 ) -> Result<u64, Box<dyn Error>> {
     let value = state_cell(row, index, column, row_index)?.trim();
+    parse_u64_value(value, row_index, column)
+}
+
+fn parse_u64_value(value: &str, row_index: usize, column: &str) -> Result<u64, Box<dyn Error>> {
+    let value = value.trim();
     value
         .strip_prefix("0x")
         .or_else(|| value.strip_prefix("0X"))
@@ -688,7 +730,7 @@ fn parse_state_mask(
         .unwrap_or_else(|| value.parse())
         .map_err(|error| {
             format!(
-                "failed to parse row {} column {column} as state mask: {error}",
+                "failed to parse row {} column {column}: {error}",
                 row_index + 1
             )
             .into()
@@ -774,13 +816,8 @@ fn save_line_plot_image(plot: &PlotData, output_path: &Path) -> Result<(), Box<d
         .draw()?;
 
     if let (Some(state_bands), Some(state_area)) = (&plot.state_bands, state_area) {
-        let labels = state_bands
-            .definitions
-            .iter()
-            .map(|definition| definition.label.as_str())
-            .collect::<Vec<_>>()
-            .join(" | ");
-        let lane_count = state_bands.definitions.len();
+        let labels = state_lane_labels(state_bands).join(" | ");
+        let lane_count = state_lane_count(state_bands);
         let mut state_chart = ChartBuilder::on(&state_area)
             .margin(16)
             .caption(
@@ -798,14 +835,14 @@ fn save_line_plot_image(plot: &PlotData, output_path: &Path) -> Result<(), Box<d
             .x_label_formatter(&|value| format_axis_value(*value, &plot.x_axis.kind))
             .draw()?;
 
-        for (index, definition) in state_bands.definitions.iter().enumerate() {
+        for (index, (track, definition)) in state_lanes(state_bands).into_iter().enumerate() {
             let lane_start = (lane_count - index - 1) as f64;
             let color = RGBColor(definition.color.0, definition.color.1, definition.color.2);
-            for (point_index, (start, mask)) in state_bands.points.iter().enumerate() {
+            for (point_index, (start, mask)) in track.points.iter().enumerate() {
                 if mask & definition.bit == 0 {
                     continue;
                 }
-                let end = state_bands
+                let end = track
                     .points
                     .get(point_index + 1)
                     .map(|(x, _)| *x)
@@ -907,7 +944,7 @@ fn draw_plot(
             let state_height = plot
                 .state_bands
                 .as_ref()
-                .map(|bands| bands.definitions.len() as u16 + 2)
+                .map(|bands| state_lane_count(bands).min(u16::MAX as usize) as u16 + 2)
                 .unwrap_or(0);
             let (plot_content_area, state_area) = if state_height == 0 {
                 (content_area, None)
@@ -1132,23 +1169,27 @@ fn render_state_bands(
     let [labels_area, bands_area] =
         Layout::horizontal([Constraint::Length(label_width), Constraint::Min(1)]).areas(inner);
     let labels = state_bands
-        .definitions
+        .tracks
         .iter()
-        .map(|definition| Line::from(definition.label.clone()))
+        .flat_map(|track| {
+            state_bands
+                .definitions
+                .iter()
+                .map(move |definition| Line::from(state_lane_label(track, definition)))
+        })
         .collect::<Vec<_>>();
     frame.render_widget(Paragraph::new(labels), labels_area);
 
     let width = usize::from(bands_area.width);
-    let rows = state_bands
-        .definitions
-        .iter()
-        .map(|definition| {
+    let rows = state_lanes(state_bands)
+        .into_iter()
+        .map(|(track, definition)| {
             Line::from(
                 (0..width)
                     .map(|column| {
                         let ratio = (column as f64 + 0.5) / width.max(1) as f64;
                         let x = x_bounds[0] + (x_bounds[1] - x_bounds[0]) * ratio;
-                        let active = state_mask_at(state_bands, x) & definition.bit != 0;
+                        let active = state_mask_at(track, x) & definition.bit != 0;
                         let style = if active {
                             Style::default().bg(state_color_for_terminal(definition.color))
                         } else {
@@ -1163,18 +1204,49 @@ fn render_state_bands(
     frame.render_widget(Paragraph::new(rows), bands_area);
 }
 
-fn state_mask_at(state_bands: &StateBands, x: f64) -> u64 {
-    state_bands
+fn state_mask_at(track: &StateTrack, x: f64) -> u64 {
+    track
         .points
         .partition_point(|(point_x, _)| *point_x <= x)
         .checked_sub(1)
-        .and_then(|index| state_bands.points.get(index))
+        .and_then(|index| track.points.get(index))
         .map(|(_, mask)| *mask)
         .unwrap_or(0)
 }
 
 fn state_color_for_terminal(color: StateColor) -> Color {
     Color::Rgb(color.0, color.1, color.2)
+}
+
+fn state_lanes(state_bands: &StateBands) -> Vec<(&StateTrack, &StateDefinition)> {
+    state_bands
+        .tracks
+        .iter()
+        .flat_map(|track| {
+            state_bands
+                .definitions
+                .iter()
+                .map(move |definition| (track, definition))
+        })
+        .collect()
+}
+
+fn state_lane_count(state_bands: &StateBands) -> usize {
+    state_bands.tracks.len() * state_bands.definitions.len()
+}
+
+fn state_lane_labels(state_bands: &StateBands) -> Vec<String> {
+    state_lanes(state_bands)
+        .into_iter()
+        .map(|(track, definition)| state_lane_label(track, definition))
+        .collect()
+}
+
+fn state_lane_label(track: &StateTrack, definition: &StateDefinition) -> String {
+    match &track.label {
+        Some(label) => format!("{label} / {}", definition.label),
+        None => definition.label.clone(),
+    }
 }
 
 fn render_chart(frame: &mut Frame, area: ratatui::layout::Rect, view: ChartView<'_>) {
@@ -2024,8 +2096,9 @@ mod tests {
         assert_eq!(state_bands.definitions.len(), 2);
         assert_eq!(state_bands.definitions[0].color, auto_state_color(0));
         assert_eq!(state_bands.definitions[1].color, StateColor(0, 255, 0));
-        assert_eq!(state_mask_at(&state_bands, 1.5), 5);
-        assert_eq!(state_mask_at(&state_bands, 2.0), 4);
+        assert_eq!(state_bands.tracks.len(), 1);
+        assert_eq!(state_mask_at(&state_bands.tracks[0], 1.5), 5);
+        assert_eq!(state_mask_at(&state_bands.tracks[0], 2.0), 4);
 
         fs::remove_file(input).unwrap();
         fs::remove_file(definitions).unwrap();
@@ -2054,6 +2127,43 @@ mod tests {
         fs::remove_file(input).unwrap();
         fs::remove_file(definitions).unwrap();
         fs::remove_file(output).unwrap();
+    }
+
+    #[test]
+    fn keeps_state_masks_separate_for_each_labeled_series() {
+        let input = temp_path("plot_labeled_states.csv");
+        let definitions = temp_path("plot_labeled_states_definition.csv");
+        write_file(
+            &input,
+            concat!(
+                "label,stamp,signal,state\n",
+                "alpha,0,1,1\n",
+                "beta,0,2,2\n",
+                "alpha,1,3,0\n",
+                "beta,1,4,1\n",
+            ),
+        )
+        .unwrap();
+        write_file(&definitions, "bit,label\n1,spike\n2,step\n").unwrap();
+
+        let plot = load_labeled_series_plot_data_with_state(
+            &read_csv(&input).unwrap(),
+            "label",
+            "stamp",
+            "signal",
+            Some(("state", &definitions)),
+        )
+        .unwrap();
+        let state_bands = plot.state_bands.unwrap();
+
+        assert_eq!(state_bands.tracks.len(), 2);
+        assert_eq!(state_bands.tracks[0].label.as_deref(), Some("alpha"));
+        assert_eq!(state_mask_at(&state_bands.tracks[0], 0.5), 1);
+        assert_eq!(state_bands.tracks[1].label.as_deref(), Some("beta"));
+        assert_eq!(state_mask_at(&state_bands.tracks[1], 0.5), 2);
+
+        fs::remove_file(input).unwrap();
+        fs::remove_file(definitions).unwrap();
     }
 
     #[test]
