@@ -132,7 +132,7 @@ cargo run -- csv_plot input.csv \
 
 ## csv_plot_image
 
-`csv_plot` と同じ列指定で、線形プロットを画像ファイルとして保存します。出力先ディレクトリが存在しない場合は自動で作成します。
+`csv_plot` と同じ列指定で、線形プロットを画像ファイルとして保存します。出力先ディレクトリが存在しない場合は自動で作成します。画像内の文字には、サブモジュール `third_party/mplus-fonts` の M PLUS 1 Regular を埋め込むため、システムフォントは不要です。フォントのライセンスは `third_party/mplus-fonts/OFL.txt` を参照してください。
 
 ```bash
 cargo run -- csv_plot_image input.csv \

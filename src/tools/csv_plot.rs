@@ -3,6 +3,7 @@ use std::error::Error;
 use std::fs;
 use std::io::stdout;
 use std::path::Path;
+use std::sync::OnceLock;
 
 use chrono::{DateTime, NaiveDateTime, TimeZone, Utc};
 use crossterm::event::{self, Event, KeyCode, KeyEventKind};
@@ -14,7 +15,7 @@ use plotters::prelude::{
     BLACK, BitMapBackend, ChartBuilder, IntoDrawingArea, IntoFont, LineSeries, PathElement,
     RGBColor, Rectangle, WHITE,
 };
-use plotters::style::Color as PlottersColor;
+use plotters::style::{Color as PlottersColor, FontStyle, register_font};
 use ratatui::backend::CrosstermBackend;
 use ratatui::layout::{Constraint, Layout};
 use ratatui::style::{Color, Style};
@@ -30,6 +31,11 @@ use super::csv_key_diff::{CsvData, read_csv};
 const HORIZONTAL_MARGIN: u16 = 12;
 const DEFAULT_IMAGE_SIZE: (u32, u32) = (1600, 900);
 const MAX_STATE_DEFINITIONS: usize = 3;
+const IMAGE_FONT_FAMILY: &str = "M PLUS 1";
+const IMAGE_FONT: &[u8] = include_bytes!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/third_party/mplus-fonts/fonts/MPLUS1/ttf/MPLUS1-Regular.ttf"
+));
 const SERIES_COLORS: [Color; 6] = [
     Color::Cyan,
     Color::Yellow,
@@ -765,6 +771,8 @@ fn save_line_plot_image(plot: &PlotData, output_path: &Path) -> Result<(), Box<d
         return Err(String::from("image export supports line plots only").into());
     }
 
+    register_image_font()?;
+
     if let Some(parent) = output_path.parent()
         && !parent.as_os_str().is_empty()
     {
@@ -782,7 +790,7 @@ fn save_line_plot_image(plot: &PlotData, output_path: &Path) -> Result<(), Box<d
 
     let mut chart = ChartBuilder::on(&chart_area)
         .margin(24)
-        .caption(plot.title.clone(), ("sans-serif", 32).into_font())
+        .caption(plot.title.clone(), (IMAGE_FONT_FAMILY, 32).into_font())
         .x_label_area_size(56)
         .y_label_area_size(64)
         .build_cartesian_2d(
@@ -796,6 +804,8 @@ fn save_line_plot_image(plot: &PlotData, output_path: &Path) -> Result<(), Box<d
         .y_desc(plot.y_axis_label.clone())
         .x_label_formatter(&|value| format_axis_value(*value, &plot.x_axis.kind))
         .y_label_formatter(&|value| format_number(*value))
+        .label_style((IMAGE_FONT_FAMILY, 18))
+        .axis_desc_style((IMAGE_FONT_FAMILY, 20))
         .light_line_style(WHITE.mix(0.15))
         .draw()?;
 
@@ -811,6 +821,7 @@ fn save_line_plot_image(plot: &PlotData, output_path: &Path) -> Result<(), Box<d
 
     chart
         .configure_series_labels()
+        .label_font((IMAGE_FONT_FAMILY, 18))
         .border_style(BLACK)
         .background_style(WHITE.mix(0.85))
         .draw()?;
@@ -822,7 +833,7 @@ fn save_line_plot_image(plot: &PlotData, output_path: &Path) -> Result<(), Box<d
             .margin(16)
             .caption(
                 format!("states (top to bottom): {labels}"),
-                ("sans-serif", 20).into_font(),
+                (IMAGE_FONT_FAMILY, 20).into_font(),
             )
             .x_label_area_size(40)
             .y_label_area_size(1)
@@ -833,6 +844,7 @@ fn save_line_plot_image(plot: &PlotData, output_path: &Path) -> Result<(), Box<d
             .disable_x_mesh()
             .y_labels(0)
             .x_label_formatter(&|value| format_axis_value(*value, &plot.x_axis.kind))
+            .label_style((IMAGE_FONT_FAMILY, 16))
             .draw()?;
 
         for (index, (track, definition)) in state_lanes(state_bands).into_iter().enumerate() {
@@ -861,6 +873,18 @@ fn save_line_plot_image(plot: &PlotData, output_path: &Path) -> Result<(), Box<d
 
     root.present()?;
     Ok(())
+}
+
+fn register_image_font() -> Result<(), Box<dyn Error>> {
+    static REGISTRATION: OnceLock<Result<(), &'static str>> = OnceLock::new();
+
+    match REGISTRATION.get_or_init(|| {
+        register_font(IMAGE_FONT_FAMILY, FontStyle::Normal, IMAGE_FONT)
+            .map_err(|_| "failed to load the embedded M PLUS 1 font")
+    }) {
+        Ok(()) => Ok(()),
+        Err(message) => Err((*message).into()),
+    }
 }
 
 fn image_series_color(index: usize) -> RGBColor {
