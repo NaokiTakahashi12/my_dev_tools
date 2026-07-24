@@ -1,0 +1,3 @@
+[submodule "third_party/mplus-fonts"]
+	path = third_party/mplus-fonts
+	url = https://github.com/coz-m/MPLUS_FONTS
