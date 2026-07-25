@@ -48,6 +48,7 @@ enum Command {
         input: PathBuf,
         mode: CsvPlotCommand,
         output: PathBuf,
+        image_size: (u32, u32),
     },
     PowerSpectrum {
         input: PathBuf,
@@ -147,8 +148,9 @@ fn run_from_args(args: Vec<OsString>) -> Result<i32, Box<dyn Error>> {
             input,
             mode,
             output,
+            image_size,
         } => {
-            run_csv_plot_image(&input, &mode, &output)?;
+            run_csv_plot_image(&input, &mode, &output, image_size)?;
             Ok(0)
         }
         Command::PowerSpectrum {
@@ -453,13 +455,13 @@ fn parse_csv_label_split(args: &[OsString]) -> Result<Command, Box<dyn Error>> {
 }
 
 fn parse_csv_plot(args: &[OsString]) -> Result<Command, Box<dyn Error>> {
-    let (input, mode, output) = parse_csv_plot_args(args, false)?;
+    let (input, mode, output, _) = parse_csv_plot_args(args, false)?;
     debug_assert!(output.is_none());
     Ok(Command::Plot { input, mode })
 }
 
 fn parse_csv_plot_image(args: &[OsString]) -> Result<Command, Box<dyn Error>> {
-    let (input, mode, output) = parse_csv_plot_args(args, true)?;
+    let (input, mode, output, image_size) = parse_csv_plot_args(args, true)?;
     let Some(output) = output else {
         return Err(String::from("csv_plot_image requires --output PATH").into());
     };
@@ -467,13 +469,14 @@ fn parse_csv_plot_image(args: &[OsString]) -> Result<Command, Box<dyn Error>> {
         input,
         mode,
         output,
+        image_size,
     })
 }
 
 fn parse_csv_plot_args(
     args: &[OsString],
     require_output: bool,
-) -> Result<(PathBuf, CsvPlotCommand, Option<PathBuf>), Box<dyn Error>> {
+) -> Result<(PathBuf, CsvPlotCommand, Option<PathBuf>, (u32, u32)), Box<dyn Error>> {
     if args.is_empty() {
         let message = if require_output {
             "csv_plot_image requires INPUT with either --x-column/--y-columns or --label-column/--timestamp-column/--value-column plus --output PATH"
@@ -492,6 +495,8 @@ fn parse_csv_plot_args(
     let mut state_column = None;
     let mut state_csv = None;
     let mut output = None;
+    let mut image_width = None;
+    let mut image_height = None;
     let mut index = 1;
 
     while index < args.len() {
@@ -550,6 +555,14 @@ fn parse_csv_plot_args(
                     return Err(String::from("missing value after --output").into());
                 };
                 output = Some(PathBuf::from(value));
+                index += 2;
+            }
+            Some("--width") if require_output => {
+                image_width = Some(parse_image_dimension(args, index, "--width")?);
+                index += 2;
+            }
+            Some("--height") if require_output => {
+                image_height = Some(parse_image_dimension(args, index, "--height")?);
                 index += 2;
             }
             Some(other) => {
@@ -640,7 +653,37 @@ fn parse_csv_plot_args(
         return Err(format!("{command_name} requires --x-column together with --y-columns").into());
     };
 
-    Ok((input, mode, output))
+    let image_size = match (image_width, image_height) {
+        (None, None) => csv_plot::DEFAULT_IMAGE_SIZE,
+        (Some(width), Some(height)) => (width, height),
+        _ => {
+            return Err(String::from(
+                "csv_plot_image requires --width PIXELS and --height PIXELS together",
+            )
+            .into());
+        }
+    };
+
+    Ok((input, mode, output, image_size))
+}
+
+fn parse_image_dimension(
+    args: &[OsString],
+    index: usize,
+    option: &str,
+) -> Result<u32, Box<dyn Error>> {
+    const MAX_IMAGE_DIMENSION: u32 = 8192;
+
+    let Some(value) = args.get(index + 1).and_then(|arg| arg.to_str()) else {
+        return Err(format!("missing value after {option}").into());
+    };
+    let dimension = value.parse::<u32>()?;
+    if !(320..=MAX_IMAGE_DIMENSION).contains(&dimension) {
+        return Err(
+            format!("{option} must be between 320 and {MAX_IMAGE_DIMENSION} pixels").into(),
+        );
+    }
+    Ok(dimension)
 }
 
 fn parse_csv_power_spectrum(args: &[OsString]) -> Result<Command, Box<dyn Error>> {
@@ -731,26 +774,28 @@ fn run_csv_plot_image(
     input: &Path,
     mode: &CsvPlotCommand,
     output: &Path,
+    image_size: (u32, u32),
 ) -> Result<(), Box<dyn Error>> {
     match mode {
         CsvPlotCommand::XY {
             x_column,
             y_columns,
             state,
-        } => csv_plot::save_image_xy_with_state(
+        } => csv_plot::save_image_xy_with_state_and_size(
             input,
             x_column,
             y_columns,
             state.as_ref().map(|state| state.column.as_str()),
             state.as_ref().map(|state| state.definitions.as_path()),
             output,
+            image_size,
         ),
         CsvPlotCommand::LabeledSeries {
             label_column,
             timestamp_column,
             value_column,
             state,
-        } => csv_plot::save_image_labeled_series_with_state(
+        } => csv_plot::save_image_labeled_series_with_state_and_size(
             input,
             label_column,
             timestamp_column,
@@ -758,6 +803,7 @@ fn run_csv_plot_image(
             state.as_ref().map(|state| state.column.as_str()),
             state.as_ref().map(|state| state.definitions.as_path()),
             output,
+            image_size,
         ),
     }
 }
@@ -773,8 +819,8 @@ fn usage() -> &'static str {
         "  my_dev_tools csv_pseudo_diff INPUT --time-column NAME --value-column NAME --time-scale VALUE [--output PATH]\n",
         "  my_dev_tools csv_plot INPUT --x-column NAME --y-columns NAME[,NAME...] [--state-column NAME --state-csv PATH]\n",
         "  my_dev_tools csv_plot INPUT --label-column NAME --timestamp-column NAME --value-column NAME [--state-column NAME --state-csv PATH]\n",
-        "  my_dev_tools csv_plot_image INPUT --x-column NAME --y-columns NAME[,NAME...] --output PATH [--state-column NAME --state-csv PATH]\n",
-        "  my_dev_tools csv_plot_image INPUT --label-column NAME --timestamp-column NAME --value-column NAME --output PATH [--state-column NAME --state-csv PATH]\n"
+        "  my_dev_tools csv_plot_image INPUT --x-column NAME --y-columns NAME[,NAME...] --output PATH [--width PIXELS --height PIXELS] [--state-column NAME --state-csv PATH]\n",
+        "  my_dev_tools csv_plot_image INPUT --label-column NAME --timestamp-column NAME --value-column NAME --output PATH [--width PIXELS --height PIXELS] [--state-column NAME --state-csv PATH]\n"
     )
 }
 
@@ -1033,6 +1079,7 @@ mod tests {
                     state: None,
                 },
                 output: PathBuf::from("plot.png"),
+                image_size: csv_plot::DEFAULT_IMAGE_SIZE,
             }
         );
     }
@@ -1064,6 +1111,40 @@ mod tests {
                     state: None,
                 },
                 output: PathBuf::from("plot.png"),
+                image_size: csv_plot::DEFAULT_IMAGE_SIZE,
+            }
+        );
+    }
+
+    #[test]
+    fn parses_csv_plot_image_size() {
+        let command = parse_args(os_args(&[
+            "csv_plot_image",
+            "input.csv",
+            "--x-column",
+            "stamp",
+            "--y-columns",
+            "signal",
+            "--output",
+            "plot.png",
+            "--width",
+            "3840",
+            "--height",
+            "2160",
+        ]))
+        .unwrap();
+
+        assert_eq!(
+            command,
+            Command::PlotImage {
+                input: PathBuf::from("input.csv"),
+                mode: CsvPlotCommand::XY {
+                    x_column: String::from("stamp"),
+                    y_columns: vec![String::from("signal")],
+                    state: None,
+                },
+                output: PathBuf::from("plot.png"),
+                image_size: (3840, 2160),
             }
         );
     }

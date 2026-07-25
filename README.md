@@ -134,10 +134,13 @@ cargo run -- csv_plot input.csv \
 
 `csv_plot` と同じ列指定で、線形プロットを画像ファイルとして保存します。出力先ディレクトリが存在しない場合は自動で作成します。画像内の文字には、サブモジュール `third_party/mplus-fonts` の M PLUS 1 Regular を埋め込むため、システムフォントは不要です。フォントのライセンスは `third_party/mplus-fonts/OFL.txt` を参照してください。
 
+標準の出力解像度は 1600x900 です。高周波の系列には `--width` と `--height` を指定して、十分な横方向のピクセル数を確保してください。表示幅よりも点数が多い系列では、各ピクセル列の最小値と最大値を保持して描画するため、ピークが欠落しません。
+
 ```bash
 cargo run -- csv_plot_image input.csv \
   --x-column stamp \
   --y-columns signal,velocity \
+  --width 3840 --height 2160 \
   --output plot.png
 
 cargo run -- csv_plot_image input.csv \

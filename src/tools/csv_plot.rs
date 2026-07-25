@@ -29,7 +29,7 @@ use rustfft::num_complex::Complex;
 use super::csv_key_diff::{CsvData, read_csv};
 
 const HORIZONTAL_MARGIN: u16 = 12;
-const DEFAULT_IMAGE_SIZE: (u32, u32) = (1600, 900);
+pub const DEFAULT_IMAGE_SIZE: (u32, u32) = (1600, 900);
 const MAX_STATE_DEFINITIONS: usize = 3;
 const IMAGE_FONT_FAMILY: &str = "M PLUS 1";
 const IMAGE_FONT: &[u8] = include_bytes!(concat!(
@@ -248,10 +248,30 @@ pub fn save_image_xy_with_state(
     state_csv_path: Option<&Path>,
     output_path: &Path,
 ) -> Result<(), Box<dyn Error>> {
+    save_image_xy_with_state_and_size(
+        input_path,
+        x_column,
+        y_columns,
+        state_column,
+        state_csv_path,
+        output_path,
+        DEFAULT_IMAGE_SIZE,
+    )
+}
+
+pub fn save_image_xy_with_state_and_size(
+    input_path: &Path,
+    x_column: &str,
+    y_columns: &[String],
+    state_column: Option<&str>,
+    state_csv_path: Option<&Path>,
+    output_path: &Path,
+    image_size: (u32, u32),
+) -> Result<(), Box<dyn Error>> {
     let csv = read_csv(input_path)?;
     let state_config = state_config_from_args(state_column, state_csv_path)?;
     let plot = load_xy_plot_data_with_state(&csv, x_column, y_columns, state_config)?;
-    save_line_plot_image(&plot, output_path)
+    save_line_plot_image(&plot, output_path, image_size)
 }
 
 pub fn save_image_labeled_series(
@@ -272,7 +292,7 @@ pub fn save_image_labeled_series(
     )
 }
 
-pub fn save_image_labeled_series_with_state(
+pub fn save_image_labeled_series_with_state_and_size(
     input_path: &Path,
     label_column: &str,
     timestamp_column: &str,
@@ -280,6 +300,7 @@ pub fn save_image_labeled_series_with_state(
     state_column: Option<&str>,
     state_csv_path: Option<&Path>,
     output_path: &Path,
+    image_size: (u32, u32),
 ) -> Result<(), Box<dyn Error>> {
     let csv = read_csv(input_path)?;
     let state_config = state_config_from_args(state_column, state_csv_path)?;
@@ -290,7 +311,28 @@ pub fn save_image_labeled_series_with_state(
         value_column,
         state_config,
     )?;
-    save_line_plot_image(&plot, output_path)
+    save_line_plot_image(&plot, output_path, image_size)
+}
+
+pub fn save_image_labeled_series_with_state(
+    input_path: &Path,
+    label_column: &str,
+    timestamp_column: &str,
+    value_column: &str,
+    state_column: Option<&str>,
+    state_csv_path: Option<&Path>,
+    output_path: &Path,
+) -> Result<(), Box<dyn Error>> {
+    save_image_labeled_series_with_state_and_size(
+        input_path,
+        label_column,
+        timestamp_column,
+        value_column,
+        state_column,
+        state_csv_path,
+        output_path,
+        DEFAULT_IMAGE_SIZE,
+    )
 }
 
 fn run_plot(plot: PlotData) -> Result<(), Box<dyn Error>> {
@@ -766,12 +808,18 @@ fn auto_state_color(index: usize) -> StateColor {
     COLORS[index]
 }
 
-fn save_line_plot_image(plot: &PlotData, output_path: &Path) -> Result<(), Box<dyn Error>> {
+fn save_line_plot_image(
+    plot: &PlotData,
+    output_path: &Path,
+    image_size: (u32, u32),
+) -> Result<(), Box<dyn Error>> {
     if !matches!(plot.kind, PlotKind::Line) {
         return Err(String::from("image export supports line plots only").into());
     }
 
     register_image_font()?;
+
+    let scale = image_scale(image_size);
 
     if let Some(parent) = output_path.parent()
         && !parent.as_os_str().is_empty()
@@ -779,20 +827,24 @@ fn save_line_plot_image(plot: &PlotData, output_path: &Path) -> Result<(), Box<d
         fs::create_dir_all(parent)?;
     }
 
-    let root = BitMapBackend::new(output_path, DEFAULT_IMAGE_SIZE).into_drawing_area();
+    let root = BitMapBackend::new(output_path, image_size).into_drawing_area();
     root.fill(&WHITE)?;
     let (chart_area, state_area) = if plot.state_bands.is_some() {
-        let (chart_area, state_area) = root.split_vertically(DEFAULT_IMAGE_SIZE.1 - 180);
+        let state_height = scaled_pixels(180, scale);
+        let (chart_area, state_area) = root.split_vertically(image_size.1 - state_height);
         (chart_area, Some(state_area))
     } else {
         (root.clone(), None)
     };
 
     let mut chart = ChartBuilder::on(&chart_area)
-        .margin(24)
-        .caption(plot.title.clone(), (IMAGE_FONT_FAMILY, 32).into_font())
-        .x_label_area_size(56)
-        .y_label_area_size(64)
+        .margin(scaled_pixels(24, scale))
+        .caption(
+            plot.title.clone(),
+            (IMAGE_FONT_FAMILY, 32.0 * scale).into_font(),
+        )
+        .x_label_area_size(scaled_pixels(56, scale))
+        .y_label_area_size(scaled_pixels(64, scale))
         .build_cartesian_2d(
             plot.x_bounds[0]..plot.x_bounds[1],
             plot.y_bounds[0]..plot.y_bounds[1],
@@ -804,24 +856,32 @@ fn save_line_plot_image(plot: &PlotData, output_path: &Path) -> Result<(), Box<d
         .y_desc(plot.y_axis_label.clone())
         .x_label_formatter(&|value| format_axis_value(*value, &plot.x_axis.kind))
         .y_label_formatter(&|value| format_number(*value))
-        .label_style((IMAGE_FONT_FAMILY, 18))
-        .axis_desc_style((IMAGE_FONT_FAMILY, 20))
+        .label_style((IMAGE_FONT_FAMILY, 18.0 * scale))
+        .axis_desc_style((IMAGE_FONT_FAMILY, 20.0 * scale))
         .light_line_style(WHITE.mix(0.15))
         .draw()?;
 
     for (index, series) in plot.series.iter().enumerate() {
         let color = image_series_color(index);
-        chart
-            .draw_series(LineSeries::new(series.points.iter().copied(), &color))?
-            .label(series.name.clone())
-            .legend(move |(x, y)| {
-                PathElement::new(vec![(x, y), (x + 24, y)], color.stroke_width(3))
-            });
+        let annotation = if let Some(envelope) = image_series_envelope(
+            &series.points,
+            plot.x_bounds,
+            image_size.0.saturating_sub(scaled_pixels(160, scale)),
+        ) {
+            chart.draw_series(envelope.into_iter().map(|(x, min, max)| {
+                PathElement::new(vec![(x, min), (x, max)], color.stroke_width(1))
+            }))?
+        } else {
+            chart.draw_series(LineSeries::new(series.points.iter().copied(), &color))?
+        };
+        annotation.label(series.name.clone()).legend(move |(x, y)| {
+            PathElement::new(vec![(x, y), (x + 24, y)], color.stroke_width(3))
+        });
     }
 
     chart
         .configure_series_labels()
-        .label_font((IMAGE_FONT_FAMILY, 18))
+        .label_font((IMAGE_FONT_FAMILY, 18.0 * scale))
         .border_style(BLACK)
         .background_style(WHITE.mix(0.85))
         .draw()?;
@@ -830,12 +890,12 @@ fn save_line_plot_image(plot: &PlotData, output_path: &Path) -> Result<(), Box<d
         let labels = state_lane_labels(state_bands).join(" | ");
         let lane_count = state_lane_count(state_bands);
         let mut state_chart = ChartBuilder::on(&state_area)
-            .margin(16)
+            .margin(scaled_pixels(16, scale))
             .caption(
                 format!("states (top to bottom): {labels}"),
-                (IMAGE_FONT_FAMILY, 20).into_font(),
+                (IMAGE_FONT_FAMILY, 20.0 * scale).into_font(),
             )
-            .x_label_area_size(40)
+            .x_label_area_size(scaled_pixels(40, scale))
             .y_label_area_size(1)
             .build_cartesian_2d(plot.x_bounds[0]..plot.x_bounds[1], 0.0..lane_count as f64)?;
         state_chart
@@ -844,7 +904,7 @@ fn save_line_plot_image(plot: &PlotData, output_path: &Path) -> Result<(), Box<d
             .disable_x_mesh()
             .y_labels(0)
             .x_label_formatter(&|value| format_axis_value(*value, &plot.x_axis.kind))
-            .label_style((IMAGE_FONT_FAMILY, 16))
+            .label_style((IMAGE_FONT_FAMILY, 16.0 * scale))
             .draw()?;
 
         for (index, (track, definition)) in state_lanes(state_bands).into_iter().enumerate() {
@@ -873,6 +933,56 @@ fn save_line_plot_image(plot: &PlotData, output_path: &Path) -> Result<(), Box<d
 
     root.present()?;
     Ok(())
+}
+
+fn image_scale(image_size: (u32, u32)) -> f64 {
+    (image_size.0 as f64 / DEFAULT_IMAGE_SIZE.0 as f64
+        + image_size.1 as f64 / DEFAULT_IMAGE_SIZE.1 as f64)
+        / 2.0
+}
+
+fn scaled_pixels(base: u32, scale: f64) -> u32 {
+    (base as f64 * scale).round().max(1.0) as u32
+}
+
+fn image_series_envelope(
+    points: &[(f64, f64)],
+    x_bounds: [f64; 2],
+    pixel_width: u32,
+) -> Option<Vec<(f64, f64, f64)>> {
+    if pixel_width == 0 || points.len() <= pixel_width as usize {
+        return None;
+    }
+
+    let x_range = x_bounds[1] - x_bounds[0];
+    if !x_range.is_finite() || x_range <= 0.0 {
+        return None;
+    }
+
+    let mut bins: Vec<Option<(f64, f64)>> = vec![None; pixel_width as usize];
+    for &(x, y) in points {
+        if x < x_bounds[0] || x > x_bounds[1] {
+            continue;
+        }
+        let index = (((x - x_bounds[0]) / x_range * pixel_width as f64) as usize)
+            .min(pixel_width as usize - 1);
+        bins[index] = Some(match bins[index] {
+            Some((min, max)) => (min.min(y), max.max(y)),
+            None => (y, y),
+        });
+    }
+
+    Some(
+        bins.into_iter()
+            .enumerate()
+            .filter_map(|(index, range)| {
+                range.map(|(min, max)| {
+                    let x = x_bounds[0] + (index as f64 + 0.5) / pixel_width as f64 * x_range;
+                    (x, min, max)
+                })
+            })
+            .collect(),
+    )
 }
 
 fn register_image_font() -> Result<(), Box<dyn Error>> {
@@ -2073,6 +2183,48 @@ mod tests {
 
         fs::remove_file(input).unwrap();
         fs::remove_file(output).unwrap();
+    }
+
+    #[test]
+    fn saves_xy_plot_image_at_requested_size() {
+        let input = temp_path("plot_image_sized.csv");
+        let output = temp_path("plot_image_sized.png");
+        write_file(&input, "t,signal\n0,1\n1,3\n2,2\n").unwrap();
+
+        save_image_xy_with_state_and_size(
+            &input,
+            "t",
+            &[String::from("signal")],
+            None,
+            None,
+            &output,
+            (640, 480),
+        )
+        .unwrap();
+
+        let png = fs::read(&output).unwrap();
+        assert_eq!(&png[16..20], &640u32.to_be_bytes());
+        assert_eq!(&png[20..24], &480u32.to_be_bytes());
+
+        fs::remove_file(input).unwrap();
+        fs::remove_file(output).unwrap();
+    }
+
+    #[test]
+    fn image_envelope_preserves_minimum_and_maximum_values() {
+        let points = (0..100)
+            .map(|index| (index as f64, if index % 2 == 0 { -2.0 } else { 3.0 }))
+            .collect::<Vec<_>>();
+
+        let envelope = image_series_envelope(&points, [0.0, 99.0], 10).unwrap();
+
+        assert_eq!(envelope.len(), 10);
+        assert!(
+            envelope
+                .iter()
+                .all(|(_, minimum, maximum)| (*minimum, *maximum) == (-2.0, 3.0))
+        );
+        assert!(image_series_envelope(&points[..10], [0.0, 9.0], 10).is_none());
     }
 
     #[test]
