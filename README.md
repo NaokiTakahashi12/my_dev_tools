@@ -4,6 +4,19 @@ Rust で実装する開発用ツール集です。
 
 入力CSVは通常の `.csv` に加えて `.zst` と `.tar.zst` を扱えます。`.tar.zst` / `.tar` は内部にCSVを1つだけ含む前提です。
 
+## system_monitor
+
+Linux のシステム全体の CPU 使用率、メモリ使用率、物理ディスクの読み書きスループットを `/proc` から取得し、CSVへ保存します。使用率の収集とファイル書き込みは別スレッドで実行されます。`--duration-secs` は必須で、`--interval-ms` を省略した場合は 1000 ms 間隔です。記録には CPU・I/O カウンタの差分を用いるため、`--duration-secs` は記録間隔以上に指定してください。
+
+```bash
+cargo run -- system_monitor \
+  --output logs/system_usage.csv \
+  --duration-secs 60 \
+  --interval-ms 1000
+```
+
+出力列は `timestamp_utc`、`elapsed_ms`、`cpu_usage_percent`、`memory_usage_percent`、`memory_used_bytes`、`memory_total_bytes`、`disk_read_bytes_per_sec`、`disk_write_bytes_per_sec` です。loop・RAM・device-mapper・RAID・光学デバイスは集計から除外します。
+
 ## csv_key_diff
 
 指定したキー列の値で 2 つの CSV の行を突き合わせ、差分を `diff` 風に標準出力します。

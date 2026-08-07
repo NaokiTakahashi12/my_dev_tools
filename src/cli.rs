@@ -7,6 +7,7 @@ use std::path::PathBuf;
 use crate::tools::csv_plot;
 use crate::tools::{
     csv_anomaly_detect, csv_key_diff, csv_key_diff_extract, csv_label_split, csv_pseudo_diff,
+    system_monitor,
 };
 
 #[derive(Debug, PartialEq)]
@@ -54,6 +55,11 @@ enum Command {
         input: PathBuf,
         x_column: String,
         y_column: String,
+    },
+    SystemMonitor {
+        output: PathBuf,
+        interval: std::time::Duration,
+        duration: std::time::Duration,
     },
 }
 
@@ -161,6 +167,14 @@ fn run_from_args(args: Vec<OsString>) -> Result<i32, Box<dyn Error>> {
             csv_plot::run_power_spectrum(&input, &x_column, &y_column)?;
             Ok(0)
         }
+        Command::SystemMonitor {
+            output,
+            interval,
+            duration,
+        } => {
+            system_monitor::run(&output, interval, duration)?;
+            Ok(0)
+        }
     }
 }
 
@@ -178,8 +192,67 @@ fn parse_args(args: Vec<OsString>) -> Result<Command, Box<dyn Error>> {
         "csv_plot" => parse_csv_plot(&args[1..]),
         "csv_plot_image" => parse_csv_plot_image(&args[1..]),
         "csv_power_spectrum" => parse_csv_power_spectrum(&args[1..]),
+        "system_monitor" => parse_system_monitor(&args[1..]),
         _ => Err(format!("unknown command: {command}\n\n{}", usage()).into()),
     }
+}
+
+fn parse_system_monitor(args: &[OsString]) -> Result<Command, Box<dyn Error>> {
+    let mut output = None;
+    let mut interval_ms = 1_000_u64;
+    let mut duration_secs = None;
+    let mut index = 0;
+
+    while index < args.len() {
+        match args[index].to_str() {
+            Some("--output") => {
+                let Some(value) = args.get(index + 1) else {
+                    return Err(String::from("missing value after --output").into());
+                };
+                output = Some(PathBuf::from(value));
+                index += 2;
+            }
+            Some("--interval-ms") => {
+                interval_ms = parse_positive_u64(args, index, "--interval-ms")?;
+                index += 2;
+            }
+            Some("--duration-secs") => {
+                duration_secs = Some(parse_positive_u64(args, index, "--duration-secs")?);
+                index += 2;
+            }
+            Some(other) => {
+                return Err(format!("unexpected argument for system_monitor: {other}").into());
+            }
+            None => return Err(String::from("arguments must be valid UTF-8").into()),
+        }
+    }
+
+    let output = output.ok_or_else(|| String::from("system_monitor requires --output PATH"))?;
+    let duration_secs = duration_secs
+        .ok_or_else(|| String::from("system_monitor requires --duration-secs SECONDS"))?;
+    if duration_secs.saturating_mul(1_000) < interval_ms {
+        return Err(String::from("--duration-secs must be at least --interval-ms").into());
+    }
+    Ok(Command::SystemMonitor {
+        output,
+        interval: std::time::Duration::from_millis(interval_ms),
+        duration: std::time::Duration::from_secs(duration_secs),
+    })
+}
+
+fn parse_positive_u64(
+    args: &[OsString],
+    index: usize,
+    option: &str,
+) -> Result<u64, Box<dyn Error>> {
+    let Some(value) = args.get(index + 1).and_then(|arg| arg.to_str()) else {
+        return Err(format!("missing value after {option}").into());
+    };
+    let value = value.parse::<u64>()?;
+    if value == 0 {
+        return Err(format!("{option} must be greater than zero").into());
+    }
+    Ok(value)
 }
 
 fn parse_csv_key_diff(args: &[OsString]) -> Result<Command, Box<dyn Error>> {
@@ -816,6 +889,7 @@ fn usage() -> &'static str {
         "  my_dev_tools csv_key_diff_extract LEFT RIGHT DIFF --output_left PATH --output_right PATH\n",
         "  my_dev_tools csv_label_split INPUT --label-column NAME [--output-dir PATH]\n",
         "  my_dev_tools csv_power_spectrum INPUT --x-column NAME --y-column NAME\n",
+        "  my_dev_tools system_monitor --output PATH --duration-secs SECONDS [--interval-ms MILLISECONDS]\n",
         "  my_dev_tools csv_pseudo_diff INPUT --time-column NAME --value-column NAME --time-scale VALUE [--output PATH]\n",
         "  my_dev_tools csv_plot INPUT --x-column NAME --y-columns NAME[,NAME...] [--state-column NAME --state-csv PATH]\n",
         "  my_dev_tools csv_plot INPUT --label-column NAME --timestamp-column NAME --value-column NAME [--state-column NAME --state-csv PATH]\n",
@@ -1145,6 +1219,29 @@ mod tests {
                 },
                 output: PathBuf::from("plot.png"),
                 image_size: (3840, 2160),
+            }
+        );
+    }
+
+    #[test]
+    fn parses_system_monitor_command() {
+        let command = parse_args(os_args(&[
+            "system_monitor",
+            "--output",
+            "logs/usage.csv",
+            "--duration-secs",
+            "30",
+            "--interval-ms",
+            "500",
+        ]))
+        .unwrap();
+
+        assert_eq!(
+            command,
+            Command::SystemMonitor {
+                output: PathBuf::from("logs/usage.csv"),
+                interval: std::time::Duration::from_millis(500),
+                duration: std::time::Duration::from_secs(30),
             }
         );
     }
