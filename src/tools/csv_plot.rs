@@ -297,13 +297,15 @@ pub fn save_image_labeled_series_with_state_and_size(
     label_column: &str,
     timestamp_column: &str,
     value_column: &str,
-    state_column: Option<&str>,
-    state_csv_path: Option<&Path>,
+    state: Option<(&str, &Path)>,
     output_path: &Path,
     image_size: (u32, u32),
 ) -> Result<(), Box<dyn Error>> {
     let csv = read_csv(input_path)?;
-    let state_config = state_config_from_args(state_column, state_csv_path)?;
+    let state_config = match state {
+        Some((column, definitions)) => state_config_from_args(Some(column), Some(definitions))?,
+        None => None,
+    };
     let plot = load_labeled_series_plot_data_with_state(
         &csv,
         label_column,
@@ -328,8 +330,7 @@ pub fn save_image_labeled_series_with_state(
         label_column,
         timestamp_column,
         value_column,
-        state_column,
-        state_csv_path,
+        state_column.zip(state_csv_path),
         output_path,
         DEFAULT_IMAGE_SIZE,
     )

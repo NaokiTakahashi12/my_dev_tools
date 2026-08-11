@@ -5,5 +5,6 @@ pub mod csv_label_split;
 pub mod csv_plot;
 pub mod csv_pseudo_diff;
 pub mod system_monitor;
+pub mod task_schedule;
 #[cfg(test)]
 pub mod test_support;

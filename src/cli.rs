@@ -7,7 +7,7 @@ use std::path::PathBuf;
 use crate::tools::csv_plot;
 use crate::tools::{
     csv_anomaly_detect, csv_key_diff, csv_key_diff_extract, csv_label_split, csv_pseudo_diff,
-    system_monitor,
+    system_monitor, task_schedule,
 };
 
 #[derive(Debug, PartialEq)]
@@ -61,6 +61,10 @@ enum Command {
         interval: std::time::Duration,
         duration: std::time::Duration,
     },
+    TaskSchedule {
+        input: PathBuf,
+        output: PathBuf,
+    },
 }
 
 #[derive(Debug, PartialEq)]
@@ -83,6 +87,8 @@ struct StateOverlayCommand {
     column: String,
     definitions: PathBuf,
 }
+
+type ParsedCsvPlotArgs = (PathBuf, CsvPlotCommand, Option<PathBuf>, (u32, u32));
 
 pub fn run() -> Result<i32, Box<dyn Error>> {
     let args = env::args_os().skip(1).collect::<Vec<_>>();
@@ -175,6 +181,10 @@ fn run_from_args(args: Vec<OsString>) -> Result<i32, Box<dyn Error>> {
             system_monitor::run(&output, interval, duration)?;
             Ok(0)
         }
+        Command::TaskSchedule { input, output } => {
+            task_schedule::run(&input, &output)?;
+            Ok(0)
+        }
     }
 }
 
@@ -193,8 +203,37 @@ fn parse_args(args: Vec<OsString>) -> Result<Command, Box<dyn Error>> {
         "csv_plot_image" => parse_csv_plot_image(&args[1..]),
         "csv_power_spectrum" => parse_csv_power_spectrum(&args[1..]),
         "system_monitor" => parse_system_monitor(&args[1..]),
+        "task_schedule" => parse_task_schedule(&args[1..]),
         _ => Err(format!("unknown command: {command}\n\n{}", usage()).into()),
     }
+}
+
+fn parse_task_schedule(args: &[OsString]) -> Result<Command, Box<dyn Error>> {
+    let Some(input) = args.first() else {
+        return Err(String::from("task_schedule requires INPUT --output PATH").into());
+    };
+    let mut output = None;
+    let mut index = 1;
+    while index < args.len() {
+        match args[index].to_str() {
+            Some("--output") => {
+                let Some(value) = args.get(index + 1) else {
+                    return Err(String::from("missing value after --output").into());
+                };
+                output = Some(PathBuf::from(value));
+                index += 2;
+            }
+            Some(other) => {
+                return Err(format!("unexpected argument for task_schedule: {other}").into());
+            }
+            None => return Err(String::from("arguments must be valid UTF-8").into()),
+        }
+    }
+    let output = output.ok_or_else(|| String::from("task_schedule requires --output PATH"))?;
+    Ok(Command::TaskSchedule {
+        input: PathBuf::from(input),
+        output,
+    })
 }
 
 fn parse_system_monitor(args: &[OsString]) -> Result<Command, Box<dyn Error>> {
@@ -549,7 +588,7 @@ fn parse_csv_plot_image(args: &[OsString]) -> Result<Command, Box<dyn Error>> {
 fn parse_csv_plot_args(
     args: &[OsString],
     require_output: bool,
-) -> Result<(PathBuf, CsvPlotCommand, Option<PathBuf>, (u32, u32)), Box<dyn Error>> {
+) -> Result<ParsedCsvPlotArgs, Box<dyn Error>> {
     if args.is_empty() {
         let message = if require_output {
             "csv_plot_image requires INPUT with either --x-column/--y-columns or --label-column/--timestamp-column/--value-column plus --output PATH"
@@ -873,8 +912,9 @@ fn run_csv_plot_image(
             label_column,
             timestamp_column,
             value_column,
-            state.as_ref().map(|state| state.column.as_str()),
-            state.as_ref().map(|state| state.definitions.as_path()),
+            state
+                .as_ref()
+                .map(|state| (state.column.as_str(), state.definitions.as_path())),
             output,
             image_size,
         ),
@@ -890,6 +930,7 @@ fn usage() -> &'static str {
         "  my_dev_tools csv_label_split INPUT --label-column NAME [--output-dir PATH]\n",
         "  my_dev_tools csv_power_spectrum INPUT --x-column NAME --y-column NAME\n",
         "  my_dev_tools system_monitor --output PATH --duration-secs SECONDS [--interval-ms MILLISECONDS]\n",
+        "  my_dev_tools task_schedule INPUT --output PATH\n",
         "  my_dev_tools csv_pseudo_diff INPUT --time-column NAME --value-column NAME --time-scale VALUE [--output PATH]\n",
         "  my_dev_tools csv_plot INPUT --x-column NAME --y-columns NAME[,NAME...] [--state-column NAME --state-csv PATH]\n",
         "  my_dev_tools csv_plot INPUT --label-column NAME --timestamp-column NAME --value-column NAME [--state-column NAME --state-csv PATH]\n",
@@ -1242,6 +1283,25 @@ mod tests {
                 output: PathBuf::from("logs/usage.csv"),
                 interval: std::time::Duration::from_millis(500),
                 duration: std::time::Duration::from_secs(30),
+            }
+        );
+    }
+
+    #[test]
+    fn parses_task_schedule_command() {
+        let command = parse_args(os_args(&[
+            "task_schedule",
+            "tasks.csv",
+            "--output",
+            "schedule.csv",
+        ]))
+        .unwrap();
+
+        assert_eq!(
+            command,
+            Command::TaskSchedule {
+                input: PathBuf::from("tasks.csv"),
+                output: PathBuf::from("schedule.csv"),
             }
         );
     }

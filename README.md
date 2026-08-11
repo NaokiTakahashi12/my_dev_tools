@@ -4,6 +4,25 @@ Rust で実装する開発用ツール集です。
 
 入力CSVは通常の `.csv` に加えて `.zst` と `.tar.zst` を扱えます。`.tar.zst` / `.tar` は内部にCSVを1つだけ含む前提です。
 
+## task_schedule
+
+タスク CSV から、手動作業が1件だけ並行でき、自動作業は並行できる前提で最適なスケジュールを生成します。優先度5を最重要とし、優先度重み付きのタスク完了時刻を最小化します。正確な全探索のため、現在は最大15タスクかつ100万探索状態まで対応します。
+
+入力列は `id`、`priority`、`dependencies`、`phases` です。`priority` は1から5、`dependencies` は依存先 ID を `;` 区切り、`phases` は分単位で `manual:30|auto:120|manual:15` のように指定します。`manual` と `auto` はそれぞれ `m` と `a` に短縮できます。区間は必ず手動・自動を交互に指定してください。
+
+```csv
+id,priority,dependencies,phases
+build,4,,m:30|a:20
+test,5,build,a:15|m:20
+docs,2,,m:25
+```
+
+```bash
+cargo run -- task_schedule tasks.csv --output schedule.csv
+```
+
+出力 CSV は各区間の開始・終了時刻（分）と各タスクの完了時刻を出力します。実行時にはコンソールにもガントチャートを表示します。`#` は手動区間、`=` は自動区間です。
+
 ## system_monitor
 
 Linux のシステム全体の CPU 使用率、メモリ使用率、物理ディスクの読み書きスループットを `/proc` から取得し、CSVへ保存します。使用率の収集とファイル書き込みは別スレッドで実行されます。`--duration-secs` は必須で、`--interval-ms` を省略した場合は 1000 ms 間隔です。記録には CPU・I/O カウンタの差分を用いるため、`--duration-secs` は記録間隔以上に指定してください。
